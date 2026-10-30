@@ -1,0 +1,92 @@
+{
+  "open": {
+    "title": "Open TikTok until fully loaded",
+    "subtitle": "346 MB APK, 53 dex files. Until the window is up and CPU is idle (bench/open.ps1)",
+    "unit": "s",
+    "bars": [
+      [
+        "apkscope",
+        12.4,
+        "apkscope"
+      ],
+      [
+        "JADX-GUI 1.5.6",
+        137.8,
+        "jadx"
+      ]
+    ]
+  },
+  "open-ram": {
+    "title": "RAM once TikTok is loaded",
+    "subtitle": "Working set at that moment. JADX-GUI with its official launcher (MaxRAMPercentage=70)",
+    "unit": "MB",
+    "bars": [
+      [
+        "apkscope",
+        997,
+        "apkscope"
+      ],
+      [
+        "JADX-GUI 1.5.6",
+        9644,
+        "jadx"
+      ]
+    ]
+  },
+  "export": {
+    "title": "Full Gradle export of TikTok",
+    "subtitle": "Decompile every class and write the project (bench/tiktok.ps1)",
+    "unit": "s",
+    "bars": [
+      [
+        "apkscope",
+        690.8,
+        "apkscope"
+      ],
+      [
+        "JADX 1.5.6 -e",
+        2938.4,
+        "jadx"
+      ]
+    ]
+  },
+  "export-ram": {
+    "title": "Peak RAM during the export",
+    "subtitle": "Same run",
+    "unit": "MB",
+    "bars": [
+      [
+        "apkscope",
+        857,
+        "apkscope"
+      ],
+      [
+        "JADX 1.5.6 -e",
+        2042,
+        "jadx"
+      ]
+    ]
+  },
+  "search": {
+    "title": "apkscope search on TikTok",
+    "subtitle": "Inside an open window (APK already loaded and indexed)",
+    "unit": "s",
+    "bars": [
+      [
+        "String \"/api/\"",
+        0.21,
+        "apkscope"
+      ],
+      [
+        "Code, cached",
+        2.23,
+        "apkscope"
+      ],
+      [
+        "Code, first time (fills cache)",
+        65.76,
+        "other"
+      ]
+    ]
+  }
+}

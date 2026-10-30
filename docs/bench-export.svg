@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="148" viewBox="0 0 760 148">
+<style>.t{font:600 17px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#111827}.s{font:12px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#6b7280}.l{font:13px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#6b7280}.v{font:600 13px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#111827}@media (prefers-color-scheme:dark){.t,.v{fill:#f3f4f6}.s,.l{fill:#9ca3af}}</style>
+<text class="t" x="0" y="24">Full Gradle export of TikTok</text>
+<text class="s" x="0" y="44">Decompile every class and write the project (bench/tiktok.ps1)</text>
+<text class="l" x="198" y="81" text-anchor="end">apkscope</text>
+<rect x="210" y="68" width="101.1" height="20" rx="5" fill="#3b82f6"/>
+<text class="v" x="319.1" y="83">11 min 31 s</text>
+<text class="l" x="198" y="115" text-anchor="end">JADX 1.5.6 -e</text>
+<rect x="210" y="102" width="430.0" height="20" rx="5" fill="#9ca3af"/>
+<text class="v" x="648.0" y="117">48 min 58 s</text>
+</svg>

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="182" viewBox="0 0 760 182">
+<style>.t{font:600 17px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#111827}.s{font:12px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#6b7280}.l{font:13px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#6b7280}.v{font:600 13px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#111827}@media (prefers-color-scheme:dark){.t,.v{fill:#f3f4f6}.s,.l{fill:#9ca3af}}</style>
+<text class="t" x="0" y="24">apkscope search on TikTok</text>
+<text class="s" x="0" y="44">Inside an open window (APK already loaded and indexed)</text>
+<text class="l" x="198" y="81" text-anchor="end">String "/api/"</text>
+<rect x="210" y="68" width="3.0" height="20" rx="5" fill="#3b82f6"/>
+<text class="v" x="221.0" y="83">210 ms</text>
+<text class="l" x="198" y="115" text-anchor="end">Code, cached</text>
+<rect x="210" y="102" width="14.6" height="20" rx="5" fill="#3b82f6"/>
+<text class="v" x="232.6" y="117">2.2 s</text>
+<text class="l" x="198" y="149" text-anchor="end">Code, first time (fills cache)</text>
+<rect x="210" y="136" width="430.0" height="20" rx="5" fill="#a78bfa"/>
+<text class="v" x="648.0" y="151">1 min 06 s</text>
+</svg>

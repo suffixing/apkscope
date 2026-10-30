@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x64 }
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: windows-latest, name: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # CLI + MCP server, no GUI libraries needed
+      - run: cargo test --release --no-default-features
+      - run: cargo build --release --no-default-features
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apkscope-cli-${{ matrix.name }}
+          path: |
+            target/release/apkscope
+            target/release/apkscope.exe
+          if-no-files-found: ignore
+      # the viewer builds on Windows (where it is tested)
+      - if: matrix.os == 'windows-latest'
+        run: cargo build --release
