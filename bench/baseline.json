@@ -1,20 +1,20 @@
 {
   "Unciv.apk": {
     "exit": 0,
-    "gotos": 8237,
-    "lines": 1385145,
+    "gotos": 4041,
+    "lines": 1393128,
     "panics": 0,
     "smali_fallbacks": 0,
-    "unmatched_locks": 222,
-    "warned_methods": 3302
+    "unmatched_locks": 89,
+    "warned_methods": 1763
   },
   "Zestle_v0.6.8-prealpha.apk": {
     "exit": 0,
-    "gotos": 9490,
-    "lines": 784113,
+    "gotos": 4009,
+    "lines": 781376,
     "panics": 0,
     "smali_fallbacks": 0,
-    "unmatched_locks": 714,
-    "warned_methods": 2395
+    "unmatched_locks": 452,
+    "warned_methods": 1180
   }
 }

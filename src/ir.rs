@@ -635,11 +635,16 @@ impl<'a> Ctx<'a> {
             }
             Invoke(kind, m, args) => {
                 let Ok((c, name, p)) = d.method_parts(*m) else { return format!("method#{m}") };
-                let name = crate::deobf::method(&name).unwrap_or(name);
+                let name = crate::deobf::method(&c, &name).unwrap_or(name);
                 let params = d.proto_parts(p).map(|p| p.1).unwrap_or_default();
                 if *kind == Call::Static || args.is_empty() {
                     let a = self.call_args(args, &params);
-                    return self.owner(&c).map_or(format!("{name}({a})"), |o| format!("{o}.{name}({a})"));
+                    let call = self.owner(&c).map_or(format!("{name}({a})"), |o| format!("{o}.{name}({a})"));
+                    // string decryptor on constants: show what it returns
+                    return match (*kind == Call::Static).then(|| crate::re::decrypt_call(d, *m, args)).flatten() {
+                        Some(p) => format!("{call} /* = {} */", java_string(&p).replace("*/", "* /")),
+                        None => call,
+                    };
                 }
                 let a = self.call_args(&args[1..], &params);
                 let recv = self.atom(&args[0]);

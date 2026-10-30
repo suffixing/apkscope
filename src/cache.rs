@@ -18,13 +18,14 @@ pub fn root() -> PathBuf {
 }
 
 /// Cache folder for one APK: changes when the file, the deobfuscation choice or apkscope changes.
-pub fn dir_for(apk: &str, deobf: bool) -> PathBuf {
+/// `tag` = hash of the user's renames and comments (0 = none).
+pub fn dir_for(apk: &str, deobf: bool, tag: u64) -> PathBuf {
     let meta = fs::metadata(apk).ok();
     let size = meta.as_ref().map_or(0, |m| m.len());
     let mtime = meta.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
     let name = Path::new(apk).file_stem().map_or("apk".into(), |s| s.to_string_lossy().into_owned());
     let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(40).collect();
-    root().join(format!("{safe}-{size:x}-{mtime:x}-{}-{}", if deobf { "d" } else { "n" }, env!("CARGO_PKG_VERSION")))
+    root().join(format!("{safe}-{size:x}-{mtime:x}-{}-{}{}", if deobf { "d" } else { "n" }, env!("CARGO_PKG_VERSION"), if tag == 0 { String::new() } else { format!("-u{:x}", tag & 0xffff_ffff) }))
 }
 
 /// Total size of every cache, in bytes.

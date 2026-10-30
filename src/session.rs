@@ -181,6 +181,11 @@ pub fn load(path: &str, deobf: bool) -> Result<State, String> {
     if deobf {
         crate::deobf::init(&dexes);
     }
+    let notes = crate::re::load_notes(path)?;
+    let tag = crate::re::notes_tag(&notes);
+    crate::deobf::set_notes(notes);
+    // inline string decryption needs every DEX, from any thread
+    crate::re::set_dexes(Box::leak(raw.iter().filter_map(|b| Dex::parse(b).ok()).collect::<Vec<_>>().into_boxed_slice()));
     crate::imports::init(&dexes);
     let mut classes = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -220,7 +225,7 @@ pub fn load(path: &str, deobf: bool) -> Result<State, String> {
     }
     let methods = dexes.iter().map(|d| (0..d.class_count).map(|c| d.class_data(c).map_or(0, |x| x.methods.len())).sum::<usize>()).sum();
     let origin = classes.iter().map(|c| self::origin(&c.0, &package)).collect();
-    let cache_dir = cache::dir_for(&real, deobf);
+    let cache_dir = cache::dir_for(&real, deobf, tag);
     let reader = cache::Reader::open(&cache_dir, classes.len()).map(Arc::new);
     Ok(State {
         path: path.to_string(),
@@ -692,7 +697,7 @@ fn candidates(st: &State, m: &Matcher) -> Option<Vec<usize>> {
                                 } else {
                                     dx.method_parts(id as u32).map(|(c, n, _)| (c, n, String::new())).unwrap_or_default()
                                 };
-                                let shown = if kind == index::FIELD { crate::deobf::field(&owner, &name, &ty) } else { crate::deobf::method(&name) };
+                                let shown = if kind == index::FIELD { crate::deobf::field(&owner, &name, &ty) } else { crate::deobf::method(&owner, &name) };
                                 match m.scope {
                                     Scope::Http => kind == index::METHOD && HTTP_MEMBERS.contains(&name.as_str()),
                                     Scope::Secrets => secret_names.is_match(&name),

@@ -132,6 +132,7 @@ fn class_body(dex: &Dex, c: usize, name: &str) -> R<String> {
         let orig = def.class.trim_start_matches('L').trim_end_matches(';').replace('/', ".");
         let _ = writeln!(out, "/* renamed from: {orig} */");
     }
+    out += &user_note(&def.class, "");
     out += &annotation_lines(dex, &anns.class, "");
     // a nested class's real modifiers (private, static ...) live in its InnerClass annotation
     let a = system(&anns.class, dex, "Ldalvik/annotation/InnerClass;")
@@ -240,6 +241,7 @@ fn members(dex: &Dex, c: usize, name: &str, access: u32, def: &dex::ClassDef, da
             continue;
         }
         let (_, ty, name) = dex.field_parts(f)?;
+        out += &user_note(&format!("{}->{name}", def.class), "    ");
         if let Some(fa) = anns.fields.get(&f) {
             out += &annotation_lines(dex, fa, "    ");
         }
@@ -385,14 +387,15 @@ pub fn anon_new(ctx: &ir::Ctx, desc: &str, args: &[ir::Expr]) -> Option<String> 
 }
 
 fn method(dex: &Dex, class: &str, class_name: &str, m: &dex::Method, anns: &dex::Annotations) -> R<String> {
-    let (_, mut name, proto) = dex.method_parts(m.method_idx)?;
-    let renamed_from = crate::deobf::method(&name).map(|n| std::mem::replace(&mut name, n));
+    let (owner, mut name, proto) = dex.method_parts(m.method_idx)?;
+    let renamed_from = crate::deobf::method(&owner, &name).map(|n| std::mem::replace(&mut name, n));
     let (ret, params) = dex.proto_parts(proto)?;
     let is_static = m.access & 0x8 != 0;
     let mods = modifiers(m.access, true);
     let no_anns = Vec::new();
     let manns = anns.methods.get(&m.method_idx).unwrap_or(&no_anns);
-    let pre = format!("{}{}", renamed_comment(&renamed_from), annotation_lines(dex, manns, "    "));
+    let note = user_note(&format!("{owner}->{}()", renamed_from.as_deref().unwrap_or(&name)), "    ");
+    let pre = format!("{note}{}{}", renamed_comment(&renamed_from), annotation_lines(dex, manns, "    "));
     let throws = system(manns, dex, "Ldalvik/annotation/Throws;")
         .and_then(|t| element(t, dex, "value"))
         .map_or(String::new(), |v| match v {
@@ -781,6 +784,12 @@ pub fn smali_fallback(dex: &Dex, m: &dex::Method, why: &str) -> String {
     out + "     */\n"
 }
 
+/// The user's comment from the project file, as `// NOTE:` lines.
+fn user_note(key: &str, indent: &str) -> String {
+    crate::deobf::comment(key).map_or(String::new(), |c| c.lines().map(|l| format!("{indent}// NOTE: {l}
+")).collect())
+}
+
 fn renamed_comment(from: &Option<String>) -> String {
     from.as_ref().map_or(String::new(), |f| format!("    /* renamed from: {f} */
 "))
@@ -888,11 +897,47 @@ impl<'a> Emitter<'a> {
                 body[h].iter().chain([&h]).flat_map(|&x| cfg.blocks[x].succs()).filter(|&s| !inside(s)).min()
             })
             .collect();
+        let follow = Self::loop_follows(cfg, &body, follow);
         Emitter {
             merge: merge_points(cfg, &header),
             ctx, insns, cfg, bir, visited: vec![false; n], header, follow, loops: vec![],
             lines: vec![], starts: HashMap::new(), labels: BTreeSet::new(), trys: vec![], try_exit: None, skip: HashMap::new(),
         }
+    }
+
+    /// A loop with several exits that merge again (`found -> x = 1`, `done -> x = 0`) follows at the
+    /// merge, so each exit becomes `...; break;` instead of one exit running on inside the loop.
+    fn loop_follows(cfg: &Cfg, body: &[Vec<usize>], mut follow: Vec<Option<usize>>) -> Vec<Option<usize>> {
+        let chain = |mut x: usize| {
+            let mut c = vec![x];
+            while let Some(p) = cfg.ipdom[x].filter(|&p| p != x && c.len() < 64) {
+                c.push(p);
+                x = p;
+            }
+            c
+        };
+        for h in 0..body.len() {
+            let Some(first) = follow[h] else { continue };
+            let inside = |x: usize| x == h || body[h].contains(&x);
+            let mut exits: Vec<usize> = body[h].iter().chain([&h]).flat_map(|&x| cfg.blocks[x].succs()).filter(|&s| !inside(s)).collect();
+            exits.sort_unstable();
+            exits.dedup();
+            // exits that leave the method (return/throw) don't need to meet the others
+            let chains: Vec<Vec<usize>> = exits.iter().map(|&e| chain(e)).filter(|c| c.len() > 1 || cfg.blocks[c[0]].term != Term::Exit).collect();
+            if chains.len() < 2 {
+                continue;
+            }
+            // the merge must stay inside every enclosing loop and the same try
+            let ok = |m: usize| {
+                !inside(m)
+                    && cfg.blocks[m].handlers == cfg.blocks[h].handlers
+                    && (0..body.len()).all(|h2| h2 == h || !body[h2].contains(&h) || body[h2].contains(&m))
+            };
+            if let Some(m) = chain(first).into_iter().find(|&m| ok(m) && chains.iter().all(|c| c.contains(&m))) {
+                follow[h] = Some(m);
+            }
+        }
+        follow
     }
 
     fn line(&mut self, ind: usize, s: String) {
@@ -1353,6 +1398,24 @@ mod tests {
         assert!(out.contains("while (v0 != 0) {
             v1 = v1 + 1;
         }"), "{out}");
+    }
+
+    #[test]
+    fn loop_exits_meet_after_the_loop() {
+        let d = crate::dex::tests::tiny_dex();
+        let dex = Dex::parse(&d).unwrap();
+        // 0: if-eqz v0, 7 ; 2: if-nez v1, 9 ; 4: add-int/lit8 v2, v2, 1 ; 6: goto 0
+        // 7: const/4 v3, 0 ; 8: goto 10 ; 9: const/4 v3, 1 ; 10: return-void
+        let units: Vec<u8> = [0x0038u16, 0x0007, 0x0139, 0x0007, 0x02d8, 0x0102, 0xfa28, 0x0312, 0x0228, 0x1312, 0x000e]
+            .iter().flat_map(|u| u.to_le_bytes()).collect();
+        let insns = bytecode::decode(&units).unwrap();
+        let cfg = cfg::build(&insns, &units, &[]).unwrap();
+        let bir: Bir = cfg.blocks.iter().map(|b| ir::lower(&dex, &insns, &units, b.first, b.last, &b.term).unwrap()).collect();
+        let ctx = Ctx { dex: &dex, class: "La/b/Cls;", ret: "V".into(), vars: None };
+        let mut e = Emitter::new(&ctx, &insns, &cfg, &bir);
+        e.seq(0, None, 2);
+        let out = e.finish();
+        assert!(!out.contains("goto") && out.contains("v3 = 0;") && out.contains("v3 = 1;"), "{out}");
     }
 
     #[test]

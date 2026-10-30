@@ -180,19 +180,25 @@ enum Open {
     Res(String),
     Native(String),
     File(String),
+    /// generated text: callers, call graph, Frida script, security scan ...
+    Report(String),
 }
 
 impl Open {
     fn name(&self) -> &str {
         match self {
             Open::Overview => "Overview",
-            Open::Class(c) | Open::Res(c) | Open::Native(c) | Open::File(c) => c,
+            Open::Class(c) | Open::Res(c) | Open::Native(c) | Open::File(c) | Open::Report(c) => c,
         }
     }
 
     fn short(&self) -> &str {
         let n = self.name();
-        let sep = if matches!(self, Open::Class(_)) { '.' } else { '/' };
+        let sep = match self {
+            Open::Class(_) => '.',
+            Open::Report(_) => return n,
+            _ => '/',
+        };
         n.rsplit_once(sep).map_or(n, |x| x.1)
     }
 }
@@ -209,6 +215,140 @@ struct Doc {
     find: String,
     /// manifest text being edited, when in edit mode
     editing: Option<String>,
+    /// text to jump to once the document's text arrives
+    find_on_load: Option<String>,
+    /// line (0-based) the context menu was opened on
+    menu_line: Option<usize>,
+}
+
+/// "Rename" / "Comment" dialog
+struct NoteDlg {
+    /// project-file key: `La/b;`, `La/b;->field`, `La/b;->method()`
+    key: String,
+    comment: bool,
+    label: String,
+    text: String,
+}
+
+/// What a right-click on a line asked for.
+enum Act {
+    Callers(String, Option<String>),
+    Graph(String, Option<String>),
+    Frida(String, Option<String>),
+    Access(String, String),
+    Smali(String, String),
+    Note(String, bool, String),
+    GoTo(String),
+}
+
+/// What sits on line `at` of decompiled Java: the chain of enclosing classes (as shown) and the
+/// member declared there, as (is_method, shown name). A comment above a declaration (such as a
+/// WARNING) points at that declaration.
+fn member_at(text: &str, at: usize) -> Option<(Vec<String>, Option<(bool, String)>)> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<[regex::Regex; 3]> = OnceLock::new();
+    let [class_re, method_re, field_re] = RE.get_or_init(|| {
+        [
+            regex::Regex::new(r"^(\s*)(?:[\w@]+\s+)*(?:class|interface|enum|@interface)\s+([\w$]+)").unwrap(),
+            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?@]+\s+)*?([\w$]+)\((.*)\)\s*(?:throws [^{;]+)?\s*[{;]\s*$").unwrap(),
+            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?]+\s+)+([\w$]+)(?: = .*)?;(?:\s*//.*)?$").unwrap(),
+        ]
+    });
+    let lines: Vec<&str> = text.lines().collect();
+    let mut at = at.min(lines.len().checked_sub(1)?);
+    while at + 1 < lines.len() && {
+        let t = lines[at].trim_start();
+        t.starts_with("/*") || t.starts_with('*') || t.starts_with("//") || t.starts_with('@')
+    } {
+        at += 1;
+    }
+    let l = lines[at];
+    let indent = |s: &str| s.len() - s.trim_start().len();
+    const KW: [&str; 9] = ["if", "while", "for", "switch", "catch", "synchronized", "return", "new", "super"];
+    let (member, own_indent) = if let Some(c) = class_re.captures(l) {
+        (None, c[1].len() + 4)
+    } else if let Some(c) = method_re.captures(l).filter(|c| !KW.contains(&&c[2]) && !l.contains(" = ")) {
+        (Some((true, c[2].to_string())), c[1].len())
+    } else if let Some(c) = field_re.captures(l).filter(|c| !KW.contains(&&c[2])) {
+        (Some((false, c[2].to_string())), c[1].len())
+    } else {
+        return None;
+    };
+    // enclosing classes, innermost last
+    let mut chain = Vec::new();
+    let mut want = own_indent.checked_sub(4)?;
+    for k in (0..=at).rev() {
+        if let Some(c) = class_re.captures(lines[k]).filter(|_| indent(lines[k]) == want) {
+            chain.push(c[2].to_string());
+            if want == 0 {
+                break;
+            }
+            want -= 4;
+        }
+    }
+    chain.reverse();
+    (!chain.is_empty() && want == 0).then_some((chain, member))
+}
+
+/// Right-click menu for the line `doc.menu_line` of a tab; returns the chosen action.
+fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Option<Act> {
+    let at = doc.menu_line?;
+    let line = text.lines().nth(at).unwrap_or("");
+    let mut out = None;
+    let mut pick = |ui: &mut egui::Ui, label: &str, a: Act| {
+        if ui.button(label).clicked() {
+            out = Some(a);
+        }
+    };
+    match &doc.open {
+        Open::Report(_) if line.contains(";->") || line.trim_start().starts_with('L') => pick(ui, "Open in code", Act::GoTo(line.to_string())),
+        Open::Class(top) if doc.view == View::Java => {
+            let st = st?;
+            let Some((chain, member)) = member_at(text, at) else {
+                ui.label("Right-click a class, method or field declaration");
+                return None;
+            };
+            let &(_, d, c) = st.classes.iter().find(|x| &x.0 == top)?;
+            let t = st.dexes[d].class_descriptor(c).ok()?;
+            let owner = if chain.len() > 1 { crate::re::nested_class(&st.dexes, &t, chain.last()?) } else { t };
+            let real = member.as_ref().and_then(|(m, n)| crate::re::real_member(&st.dexes, &owner, n, *m).map(|r| (*m, r, n.clone())));
+            match &real {
+                Some((true, name, shown)) => {
+                    ui.label(RichText::new(format!("{shown}()")).strong());
+                    pick(ui, "Callers", Act::Callers(owner.clone(), Some(name.clone())));
+                    pick(ui, "Call graph", Act::Graph(owner.clone(), Some(name.clone())));
+                    pick(ui, if line.contains("WARNING") { "Show this method in Smali" } else { "Show Smali" }, Act::Smali(top.clone(), name.clone()));
+                    pick(ui, "Frida hook (copy)", Act::Frida(owner.clone(), Some(name.clone())));
+                    ui.separator();
+                    pick(ui, "Rename…", Act::Note(format!("{owner}->{name}()"), false, format!("Rename method {shown}")));
+                    pick(ui, "Comment…", Act::Note(format!("{owner}->{name}()"), true, format!("Comment on {shown}()")));
+                }
+                Some((false, name, shown)) => {
+                    ui.label(RichText::new(shown.as_str()).strong());
+                    pick(ui, "Reads & writes", Act::Access(owner.clone(), name.clone()));
+                    ui.separator();
+                    pick(ui, "Rename…", Act::Note(format!("{owner}->{name}"), false, format!("Rename field {shown}")));
+                    pick(ui, "Comment…", Act::Note(format!("{owner}->{name}"), true, format!("Comment on {shown}")));
+                }
+                None if member.is_some() => {
+                    ui.label("Not found in the DEX (synthetic or inlined code)");
+                }
+                None => {
+                    let shown = chain.last().cloned().unwrap_or_default();
+                    ui.label(RichText::new(format!("class {shown}")).strong());
+                    pick(ui, "Callers (any method)", Act::Callers(owner.clone(), None));
+                    pick(ui, "Frida hooks (all methods, copy)", Act::Frida(owner.clone(), None));
+                    ui.separator();
+                    pick(ui, "Rename…", Act::Note(owner.clone(), false, format!("Rename class {shown} (a short name keeps the package)")));
+                    pick(ui, "Comment…", Act::Note(owner.clone(), true, format!("Comment on class {shown}")));
+                }
+            }
+        }
+        _ => {
+            ui.label("Nothing to do on this line");
+        }
+    }
+    out
 }
 
 enum Msg {
@@ -297,6 +437,7 @@ pub struct App {
     toast: Option<(String, std::time::Instant)>,
     cache_size: Option<u64>,
     styled: Option<(Theme, u32)>,
+    note_dlg: Option<NoteDlg>,
     titled: bool,
     logo: Option<egui::TextureHandle>,
 }
@@ -354,6 +495,7 @@ impl App {
             toast: None,
             cache_size: None,
             styled: None,
+            note_dlg: None,
             titled: false,
             logo: None,
         };
@@ -393,7 +535,7 @@ impl App {
         let k = match self.docs.iter().position(|d| d.open == what) {
             Some(k) => k,
             None => {
-                self.docs.push(Doc { open: what.clone(), view: View::Java, text: None, mark: None, scroll_pending: false, job: None, find: String::new(), editing: None });
+                self.docs.push(Doc { open: what.clone(), view: View::Java, text: None, mark: None, scroll_pending: false, job: None, find: String::new(), editing: None, find_on_load: None, menu_line: None });
                 self.docs.len() - 1
             }
         };
@@ -419,9 +561,161 @@ impl App {
                 Open::Res(p) => st.resource(p),
                 Open::Native(p) => Some(st.native_report(p)),
                 Open::File(p) => Some(st.file_view(p)),
+                Open::Report(_) => None,
             };
             let _ = tx.send(Msg::Text(what, view, text.unwrap_or_else(|| "// not found".into())));
         });
+    }
+
+    /// Open a generated text in its own tab, computed off the UI thread.
+    fn report(&mut self, title: String, f: impl FnOnce(&'static State) -> String + Send + 'static) {
+        let Some(st) = self.st else { return };
+        let open = Open::Report(title);
+        self.docs.retain(|d| d.open != open);
+        self.docs.push(Doc { open: open.clone(), view: View::Java, text: None, mark: None, scroll_pending: false, job: None, find: String::new(), editing: None, find_on_load: None, menu_line: None });
+        self.active = self.docs.len() - 1;
+        let tx = self.tx.clone();
+        spawn(move || {
+            let _ = tx.send(Msg::Text(open, View::Java, f(st)));
+        });
+    }
+
+    /// Open the class a method ref (`La/b$C;->name(...)`) lives in, at that method.
+    fn go_to(&mut self, line: &str) {
+        let Some(st) = self.st else { return };
+        let re = regex::Regex::new(r"(L[^;\s]+;)(?:->([\w$<>]+))?").unwrap();
+        let Some((desc, name)) = re.captures(line).map(|c| (c[1].to_string(), c.get(2).map(|x| x.as_str().to_string()))) else { return };
+        let top = desc.find('$').map_or(desc.clone(), |k| format!("{};", &desc[..k]));
+        let Some(n) = st.classes.iter().find(|x| st.dexes[x.1].class_descriptor(x.2).ok().as_deref() == Some(top.as_str())).map(|x| x.0.clone()) else {
+            self.toast(format!("{desc} is not in this APK"));
+            return;
+        };
+        self.open(Open::Class(n), Some(View::Java), None);
+        let needle = match name.as_deref() {
+            Some("<init>" | "<clinit>") | None => crate::dex::java_name(&desc).rsplit(['.', '$']).next().unwrap_or("").to_string(),
+            Some(nm) => crate::deobf::method(&desc, nm).unwrap_or_else(|| nm.to_string()),
+        };
+        self.find_in_active(format!(" {needle}("));
+    }
+
+    /// Jump to `needle` in the active tab now, or once its text arrives.
+    fn find_in_active(&mut self, needle: String) {
+        let Some(d) = self.docs.get_mut(self.active) else { return };
+        match &d.text {
+            Some(t) => {
+                if let Some(l) = find_next(t, &needle, 0) {
+                    d.mark = Some(l);
+                    d.scroll_pending = true;
+                    d.job = None;
+                }
+            }
+            None => d.find_on_load = Some(needle),
+        }
+    }
+
+    /// Store a rename or comment in the project file and redraw the open classes with it.
+    fn save_note(&mut self, key: &str, comment: bool, text: &str) {
+        let Some(st) = self.st else { return };
+        let mut n = crate::deobf::notes();
+        crate::re::apply_note(&mut n, key, comment, text);
+        if let Err(e) = crate::re::save_notes(&st.path, &n) {
+            self.toast(format!("Not saved: {e}"));
+            return;
+        }
+        crate::deobf::set_notes(n);
+        // cached code has the old names; and new code must not go under the old cache key
+        st.drop_cache();
+        session::CACHE_WRITE.store(false, Ordering::Relaxed);
+        let active = self.active;
+        let reopen: Vec<(Open, View)> = self
+            .docs
+            .iter_mut()
+            .filter(|d| matches!(d.open, Open::Class(_)))
+            .map(|d| {
+                d.text = None;
+                (d.open.clone(), d.view)
+            })
+            .collect();
+        for (o, v) in reopen {
+            self.open(o, Some(v), None);
+        }
+        self.active = active.min(self.docs.len().saturating_sub(1));
+        self.toast(format!("Saved to {}", crate::re::project_file(&st.path).display()));
+    }
+
+    /// Carry out a context-menu choice.
+    fn act(&mut self, a: Act, ctx: &egui::Context) {
+        let Some(st) = self.st else { return };
+        let short = |c: &str, m: &Option<String>| format!("{}{}", crate::dex::java_name(c).rsplit('.').next().unwrap_or(""), m.as_ref().map(|m| format!(".{m}")).unwrap_or_default());
+        match a {
+            Act::Callers(c, m) => self.report(format!("Callers of {}", short(&c, &m)), move |st| {
+                let rows = crate::re::callers(&st.dexes, &c, m.as_deref());
+                let mut o = format!("// {} call sites. Right-click a line to open it.\n", rows.len());
+                for (f, t) in rows {
+                    o += &format!("{f}\n    -> {t}\n");
+                }
+                o
+            }),
+            Act::Graph(c, m) => self.report(format!("Call graph {}", short(&c, &m)), move |st| crate::re::call_graph(&st.dexes, &c, m.as_deref(), 3)),
+            Act::Access(c, f) => self.report(format!("Access {}", short(&c, &Some(f.clone()))), move |st| {
+                let rows = crate::re::field_access(&st.dexes, &c, &f);
+                let mut o = format!("// {} reads / writes. Right-click a line to open it.\n", rows.len());
+                for (m, _, w) in rows {
+                    o += &format!("{}  {m}\n", if w { "write" } else { "read " });
+                }
+                o
+            }),
+            Act::Frida(c, m) => match crate::re::frida(&st.dexes, &c, m.as_deref()) {
+                Ok(js) => {
+                    ctx.copy_text(js.clone());
+                    self.report(format!("Frida {}", short(&c, &m)), move |_| js);
+                    self.toast("Frida script copied to the clipboard");
+                }
+                Err(e) => self.toast(e),
+            },
+            Act::Smali(class_name, method) => {
+                self.open(Open::Class(class_name), Some(View::Smali), None);
+                self.find_in_active(format!(" {method}("));
+            }
+            Act::Note(key, comment, label) => {
+                let n = crate::deobf::notes();
+                let class = !key.contains("->");
+                let cur = if comment { n.comments.get(&key) } else if class { n.classes.get(&key) } else { n.members.get(&key) };
+                let text = cur.map(|v| if !comment && class { crate::dex::java_name(v) } else { v.clone() }).unwrap_or_default();
+                self.note_dlg = Some(NoteDlg { key, comment, label, text });
+            }
+            Act::GoTo(line) => self.go_to(&line),
+        }
+    }
+
+    fn note_window(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = &mut self.note_dlg else { return };
+        let mut done = None;
+        let mut open = true;
+        egui::Window::new(if dlg.comment { "Comment" } else { "Rename" }).collapsible(false).open(&mut open).show(ctx, |ui| {
+            ui.label(&dlg.label);
+            let r = if dlg.comment {
+                ui.add(egui::TextEdit::multiline(&mut dlg.text).desired_rows(4).desired_width(420.0))
+            } else {
+                ui.add(egui::TextEdit::singleline(&mut dlg.text).hint_text("new name").desired_width(320.0))
+            };
+            ui.label(RichText::new("Saved next to the APK in <apk>.apkscope.json. `apkscope map` exports it for JADX / Enigma.").small());
+            ui.horizontal(|ui| {
+                let enter = !dlg.comment && r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Save").clicked() || enter {
+                    done = Some((dlg.key.clone(), dlg.comment, dlg.text.trim().to_string()));
+                }
+                if ui.button("Remove").on_hover_text("Back to the original name / no comment").clicked() {
+                    done = Some((dlg.key.clone(), dlg.comment, String::new()));
+                }
+            });
+        });
+        if let Some((k, c, t)) = done {
+            self.note_dlg = None;
+            self.save_note(&k, c, &t);
+        } else if !open {
+            self.note_dlg = None;
+        }
     }
 
     fn close(&mut self, k: usize) {
@@ -496,6 +790,10 @@ impl App {
                 }
                 Msg::Text(open, view, text) => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.open == open && d.view == view) {
+                        if let Some(l) = d.find_on_load.take().and_then(|f| find_next(&text, &f, 0)) {
+                            d.mark = Some(l);
+                            d.scroll_pending = true;
+                        }
                         d.text = Some(Arc::new(text));
                         d.job = None;
                     }
@@ -1314,6 +1612,19 @@ impl eframe::App for App {
                         }
                     }
                 }
+                if ui.add_enabled(self.st.is_some(), egui::Button::new("Security scan")).on_hover_text("Manifest flags, exported components, risky APIs, weak crypto, TLS overrides, keys and URLs").clicked() {
+                    self.report("Security scan".into(), crate::re::scan);
+                }
+                if ui.add_enabled(self.st.is_some(), egui::Button::new("Decrypt strings")).on_hover_text("Run string-decryptor methods on their constant arguments (also shown inline in the code as /* = \"...\" */)").clicked() {
+                    self.report("Decrypted strings".into(), |st| {
+                        let rows = crate::re::decrypt_all(&st.dexes);
+                        let mut o = format!("// {} decryptor calls with constant arguments. Right-click a line to open it.\n", rows.len());
+                        for (at, f, p) in rows {
+                            o += &format!("{at}\n    {f}  =>  {}\n", session::json_str(&p));
+                        }
+                        o
+                    });
+                }
                 ui.separator();
                 egui::ComboBox::from_id_salt("scope").width(160.0).selected_text(self.scope.label()).show_ui(ui, |ui| {
                     for s in Scope::ALL {
@@ -1430,6 +1741,7 @@ impl eframe::App for App {
             let mut usages = None;
             let mut toast_msg = None;
             let mut change: Option<(String, Option<Vec<u8>>)> = None;
+            let mut act: Option<Act> = None;
             let st_now = self.st;
             let Some(doc) = self.docs.get_mut(self.active) else { return };
             ui.horizontal(|ui| {
@@ -1533,8 +1845,18 @@ impl eframe::App for App {
                     area = area.vertical_scroll_offset(((ln as f32 - 6.0).max(0.0)) * row);
                 }
             }
+            let row = ui.fonts(|f| f.row_height(&FontId::monospace(size)));
             area.show(ui, |ui| {
-                ui.add(egui::Label::new(job).extend().selectable(true));
+                let r = ui.add(egui::Label::new(job).extend().selectable(true));
+                if r.secondary_clicked() {
+                    doc.menu_line = r.interact_pointer_pos().map(|p| ((p.y - r.rect.top()) / row).max(0.0) as usize);
+                }
+                r.context_menu(|ui| {
+                    if let Some(a) = line_menu(ui, doc, &text, st_now) {
+                        act = Some(a);
+                        ui.close_menu();
+                    }
+                });
             });
             }
             let Some(_) = doc.text.clone() else {
@@ -1552,6 +1874,9 @@ impl eframe::App for App {
             if let Some(name) = usages {
                 self.usages_of(&name);
             }
+            if let Some(a) = act {
+                self.act(a, ui.ctx());
+            }
             if let Some(t) = toast_msg {
                 self.toast(t);
             }
@@ -1563,6 +1888,7 @@ impl eframe::App for App {
             }
         });
         self.export_window(ctx);
+        self.note_window(ctx);
         self.edit_windows(ctx);
         self.settings_window(ctx);
         if let Some((t, at)) = &self.toast {
@@ -1615,6 +1941,17 @@ mod tests {
         assert_eq!(t.leaves, vec![("E".to_string(), "E".to_string())]);
         assert_eq!(t.dirs["a"].leaves[0].0, "D");
         assert_eq!(t.dirs["a"].dirs["b"].leaves[0].1, "a.b.C");
+    }
+
+    #[test]
+    fn finds_member_under_cursor() {
+        let java = "package a;\n\npublic class Outer {\n    private int count;\n\n    /* WARNING: 1 jump could not be structured. */\n    public static String a(int i) {\n        int x = i;\n        return null;\n    }\n\n    static class In {\n        void run() {\n        }\n    }\n}\n";
+        assert_eq!(member_at(java, 2), Some((vec!["Outer".into()], None)));
+        assert_eq!(member_at(java, 3), Some((vec!["Outer".into()], Some((false, "count".into())))));
+        // the WARNING comment points at the method below it
+        assert_eq!(member_at(java, 5), Some((vec!["Outer".into()], Some((true, "a".into())))));
+        assert_eq!(member_at(java, 7), None);
+        assert_eq!(member_at(java, 12), Some((vec!["Outer".into(), "In".into()], Some((true, "run".into())))));
     }
 
     #[test]

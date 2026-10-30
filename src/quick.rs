@@ -654,6 +654,7 @@ pub fn refs_loaded(dexes: &[(String, Dex)], q: &Query, limit: usize) -> Result<V
 /// Decompiled Java (or Smali) of the named classes, only their DEX files' names deobfuscated.
 /// Unknown names come back as errors next to the found ones.
 pub fn decompile(path: &str, names: &[String], smali: bool, deobf: bool) -> Result<Vec<(String, Result<String, String>)>, String> {
+    crate::deobf::set_notes(crate::re::load_notes(path)?);
     let wanted: Vec<String> = names.iter().map(|n| descriptor(n)).collect();
     let seen: Vec<std::sync::atomic::AtomicBool> = wanted.iter().map(|_| Default::default()).collect();
     // only DEX files that define a wanted class are inflated past their names, and once every
@@ -706,7 +707,7 @@ pub fn decompile(path: &str, names: &[String], smali: bool, deobf: bool) -> Resu
 /// The method(s) named `name` cut out of decompiled Java: declaration line through its closing
 /// brace. An original obfuscated name finds its renamed method too (`a` -> `ma`).
 pub fn method_of(java: &str, name: &str) -> Option<String> {
-    method_named(java, name).or_else(|| method_named(java, &crate::deobf::method(name)?))
+    method_named(java, name).or_else(|| method_named(java, &crate::deobf::method("", name)?))
 }
 
 fn method_named(java: &str, name: &str) -> Option<String> {

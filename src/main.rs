@@ -17,6 +17,7 @@ mod java;
 mod mcp;
 mod opt;
 mod quick;
+mod re;
 mod rebuild;
 mod res;
 mod session;
@@ -47,6 +48,16 @@ Indexed + cached (first run builds it, later runs reuse the disk cache):
   apkscope info <apk>                      package, SDKs, permissions, exported components
   apkscope resource <apk> <res/path.xml>
   apkscope export <apk> <out-dir>          Gradle project
+Reverse engineering (Class = a.b.C, member = a.b.C#field or a.b.C#method()):
+  apkscope callers   <apk> <Class> [method]      who calls it
+  apkscope callgraph <apk> <Class> [method] [--depth N]   callers + callee tree
+  apkscope access    <apk> <Class> <field>       who reads / writes a field
+  apkscope frida     <apk> <Class> [method]      Frida hook script
+  apkscope scan      <apk>                       security quick-scan
+  apkscope decrypt   <apk>                       run string decryptors on their constant arguments
+  apkscope rename    <apk> <Class|member> <new>  saved in <apk>.apkscope.json (empty name removes it)
+  apkscope comment   <apk> <Class|member> <text>
+  apkscope map <apk> export <out.jobf|out.mapping>  |  map <apk> import <file>   JADX / Enigma names
 Editing: apkscope build <in.apk> <out.apk> [--put name=file]... [--delete name]... [--manifest x.xml]
                   [--string name[@config]=value]... [--key k.pk8 --cert c.crt]   (zipalign + v2/v3 sign)
          apkscope verify <apk>
@@ -327,10 +338,14 @@ fn disasm(path: &str, class: Option<&str>) -> Result<(), String> {
 
 fn decompile(path: &str, class: Option<&str>, deobf: bool) -> Result<(), String> {
     let apk = export::open(&session::prepare(path)?)?;
-    let dexes: Vec<dex::Dex> = apk.dex.iter().filter_map(|(_, b)| dex::Dex::parse(b).ok()).collect();
+    // 'static so inline string decryption can reach every DEX
+    let raw: &'static [Vec<u8>] = Box::leak(apk.dex.into_iter().map(|(_, b)| b).collect::<Vec<_>>().into_boxed_slice());
+    let dexes: Vec<dex::Dex<'static>> = raw.iter().filter_map(|b| dex::Dex::parse(b).ok()).collect();
     if deobf {
         deobf::init(&dexes);
     }
+    deobf::set_notes(re::load_notes(path)?);
+    re::set_dexes(Box::leak(raw.iter().filter_map(|b| dex::Dex::parse(b).ok()).collect::<Vec<_>>().into_boxed_slice()));
     crate::imports::init(&dexes);
     let mut out = BufWriter::new(std::io::stdout().lock());
     let mut found = false;
@@ -638,6 +653,55 @@ fn main() -> ExitCode {
             emit_list(&quick::diff(old, new, strings)?)
         })(),
         [cmd, path] if cmd == "manifest" || cmd == "getmanifest" => manifest_cmd(path),
+        [cmd, apk, class, rest @ ..] if cmd == "callers" || cmd == "callgraph" || cmd == "access" => run_big_stack(|| {
+            let mut rest = rest.to_vec();
+            let depth = num(opt(&mut rest, &["--depth"])?, "--depth")?.unwrap_or(3);
+            let st = load(apk, false)?;
+            let name = rest.first().map(String::as_str);
+            match cmd.as_str() {
+                "callers" => emit_list(&re::callers(&st.dexes, class, name).into_iter().map(|(f, t)| format!("{f}  ->  {t}")).collect::<Vec<_>>()),
+                "access" => {
+                    let field = name.ok_or("usage: apkscope access <apk> <Class> <field>")?;
+                    emit_list(&re::field_access(&st.dexes, class, field).into_iter().map(|(m, f, w)| format!("{}  {m}  ({f})", if w { "write" } else { "read " })).collect::<Vec<_>>())
+                }
+                _ => emit(&re::call_graph(&st.dexes, class, name, depth)),
+            }
+        }),
+        [cmd, apk, class, rest @ ..] if cmd == "frida" => load(apk, false).and_then(|st| emit(&re::frida(&st.dexes, class, rest.first().map(String::as_str))?)),
+        [cmd, apk] if cmd == "scan" => run_big_stack(|| load(apk, deobf).and_then(|st| emit(&re::scan(&st)))),
+        [cmd, apk] if cmd == "decrypt" => load(apk, false).and_then(|st| {
+            emit_list(&re::decrypt_all(&st.dexes).into_iter().map(|(at, f, p)| format!("{at}  {f}  =>  {}", session::json_str(&p))).collect::<Vec<_>>())
+        }),
+        [cmd, apk, target, text @ ..] if cmd == "rename" || cmd == "comment" => (|| {
+            let mut n = re::load_notes(apk)?;
+            let text = text.join(" ");
+            let key = match target.split_once('#').or_else(|| target.split_once("->")) {
+                Some((c, m)) => format!("{}->{m}", re::desc(c)),
+                None => re::desc(target),
+            };
+            re::apply_note(&mut n, &key, cmd == "comment", &text);
+            re::save_notes(apk, &n)?;
+            eprintln!("saved {} ({key})", re::project_file(apk).display());
+            Ok(())
+        })(),
+        [cmd, apk, dir, file] if cmd == "map" => (|| {
+            let mut n = re::load_notes(apk)?;
+            match dir.as_str() {
+                "export" => {
+                    let st = load(apk, false)?;
+                    std::fs::write(file, re::export_mapping(&st.dexes, &n, !file.ends_with(".jobf"))).map_err(|e| e.to_string())?;
+                    eprintln!("wrote {file}");
+                }
+                "import" => {
+                    let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+                    let k = re::import_mapping(&text, &mut n);
+                    re::save_notes(apk, &n)?;
+                    eprintln!("{k} names imported into {}", re::project_file(apk).display());
+                }
+                _ => return Err("usage: apkscope map <apk> export|import <file>".into()),
+            }
+            Ok(())
+        })(),
         [cmd, path] if cmd == "info" => load(path, deobf).and_then(|st| emit(&session::overview(&st))),
         [cmd, path, res] if cmd == "resource" => load(path, deobf).and_then(|st| emit(&st.target_text(res).ok_or_else(|| format!("{res} not found"))?)),
         [cmd] if cmd == "mcp" => mcp::serve(),

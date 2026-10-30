@@ -13,6 +13,17 @@ static CLASSES: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// (enum descriptor, obfuscated field) -> the constant's real name, read from `new E("NAME", ...)`
 static ENUM_NAMES: OnceLock<HashMap<(String, String), String>> = OnceLock::new();
 
+/// The user's own names and notes, from the project file next to the APK (see `notes`).
+static USER: OnceLock<std::sync::RwLock<Notes>> = OnceLock::new();
+
+/// Persistent renames and comments. Keys: class `La/b;`, field `La/b;->name`, method `La/b;->name()` (all overloads).
+#[derive(Default, Clone)]
+pub struct Notes {
+    pub classes: HashMap<String, String>,
+    pub members: HashMap<String, String>,
+    pub comments: HashMap<String, String>,
+}
+
 /// Real short names that must survive (`id`, `x`, `ui` ...).
 const KEEP: &[&str] = &["x", "y", "z", "w", "h", "id", "to", "of", "on", "is", "at", "go", "up", "ok", "io", "ui", "op", "os", "db", "fn", "it", "js", "vm", "tv", "gl", "ml", "ws", "rx", "v4", "v7"];
 
@@ -51,9 +62,44 @@ pub fn enabled() -> bool {
     CLASSES.get().is_some()
 }
 
-/// Renamed class descriptor, if deobfuscation is on and the class was renamed.
+/// Renamed class descriptor: the user's name first, else the deobfuscated one.
 pub fn class(desc: &str) -> Option<&'static str> {
+    // a renamed outer class carries its nested classes along: `La/C$In;` -> `La/New$In;`
+    let renamed = user(|u| {
+        u.classes.get(desc).cloned().or_else(|| {
+            let mut cut = desc.len() - 1;
+            while let Some(k) = desc[..cut].rfind('$') {
+                if let Some(o) = u.classes.get(&format!("{};", &desc[..k])) {
+                    return Some(format!("{}{}", o.trim_end_matches(';'), &desc[k..]));
+                }
+                cut = k;
+            }
+            None
+        })
+    });
+    if let Some(n) = renamed {
+        // shortcut: leaks the string per lookup of a user-renamed class; a few bytes per render
+        return Some(Box::leak(n.into_boxed_str()));
+    }
     CLASSES.get()?.get(desc).map(String::as_str)
+}
+
+fn user<T>(f: impl FnOnce(&Notes) -> Option<T>) -> Option<T> {
+    USER.get().and_then(|u| f(&u.read().unwrap()))
+}
+
+/// Replace the user's names and notes (at load, and after each edit in the viewer).
+pub fn set_notes(n: Notes) {
+    *USER.get_or_init(Default::default).write().unwrap() = n;
+}
+
+pub fn notes() -> Notes {
+    user(|u| Some(u.clone())).unwrap_or_default()
+}
+
+/// The user's comment on a class (`La/b;`) or member (`La/b;->name`).
+pub fn comment(key: &str) -> Option<String> {
+    user(|u| u.comments.get(key).cloned())
 }
 
 /// Original characters kept as-is: `a` and `A` are different members and must stay different.
@@ -61,13 +107,19 @@ fn ident(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '$' { c } else { '_' }).collect()
 }
 
-/// `a()` -> `ma()`, `A()` -> `mA()`
-pub fn method(name: &str) -> Option<String> {
+/// `a()` -> `ma()`, `A()` -> `mA()`; a user rename of `owner->name` wins
+pub fn method(owner: &str, name: &str) -> Option<String> {
+    if let Some(n) = user(|u| u.members.get(&format!("{owner}->{name}()")).cloned()) {
+        return Some(n);
+    }
     (enabled() && obfuscated(name)).then(|| format!("m{}", ident(name)))
 }
 
 /// field `a` of type `String` -> `str_a`; the type keeps same-named fields of different types apart
 pub fn field(owner: &str, name: &str, ty: &str) -> Option<String> {
+    if let Some(n) = user(|u| u.members.get(&format!("{owner}->{name}")).cloned()) {
+        return Some(n);
+    }
     if !enabled() || !obfuscated(name) {
         return None;
     }

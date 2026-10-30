@@ -116,6 +116,25 @@ Add `--json`, `--limit N` or `--offset N` to any of them. Takes `.apk`, `.apks`,
 `apkscope --help` lists every command. rust_ASC's command names (`findrefs`, `getclass`...)
 work too.
 
+**New in 0.5: reverse-engineering tools.**
+
+```bash
+apkscope callers   app.apk com.example.Api login            # every method that calls it
+apkscope callgraph app.apk com.example.Api login --depth 3  # callers + the tree of what it calls
+apkscope access    app.apk com.example.Session token        # who reads / writes a field
+apkscope frida     app.apk com.example.Api login            # ready-to-run Frida hook (args, return, throws)
+apkscope scan      app.apk                                  # security quick-scan: flags, components, risky APIs,
+                                                            #   weak crypto, TLS overrides, keys, URLs
+apkscope decrypt   app.apk                                  # run string decryptors on their constant args
+apkscope rename    app.apk "com.a.b#c()" login              # your names and comments, kept in
+apkscope comment   app.apk com.a.b "talks to the payment API" #   app.apk.apkscope.json across runs
+apkscope map app.apk export names.mapping                   # to Enigma (.mapping) or JADX (.jobf); `import` too
+```
+
+String decryption runs the app's own decryptor in a small, sandboxed Dalvik interpreter (no I/O,
+no reflection, step-limited), and the plaintext also shows up inline next to the call:
+`a.b("x#9!") /* = "https://api.example.com" */`.
+
 **New in 0.4: `diff`.** Compare two versions of an app and see the classes, methods, permissions and
 strings that were added or removed. New endpoints and keys stand out right away.
 
@@ -144,6 +163,11 @@ exported components, risky flags, signature), your app's code apart from the lib
 built for API work, native library reports with JNI methods decoded, and **Edit → Build & sign**
 with undo.
 
+Right-click a class, method or field in the code for **Callers**, **Call graph**, **Reads & writes**,
+**Show Smali** (also on a `WARNING` header), **Frida hook**, **Rename** and **Comment**. Renames
+and comments are saved next to the APK and come back next time. **Security scan** and **Decrypt
+strings** are in the top bar. In any result tab, right-click a line to jump to that code.
+
 ## Honest limits
 
 - Some complex methods still use `goto` labels (they're marked with a `WARNING`).
@@ -152,6 +176,12 @@ with undo.
 - Opening huge apps in the viewer takes about 1 GB (TikTok). The first full-code search takes a minute; later ones are cached.
 - The viewer is tested on Windows. The CLI and MCP server pass CI on Linux and macOS.
 - Secret and URL scans are heuristics: runtime-built or encrypted strings won't show up.
+- String decryption only runs decryptors that compute from constants (string/char/byte math,
+  `StringBuilder`, Base64, static arrays). Ones that read app state, files, or use reflection or
+  `javax.crypto` are left alone.
+- Callers, call graphs and Frida hooks see direct calls only, not reflection, JNI or dynamic code.
+- A rename applies to the class that declares the member. Call sites that reach it through a
+  subclass keep the old name.
 
 ## Written from scratch
 
