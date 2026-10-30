@@ -3,7 +3,7 @@ name = "apkscope"
 version = "0.4.0"
 edition = "2024"
 description = "Android APK decompiler, xref engine and MCP server for AI agents: readable Java, API recon, Gradle export, APK re-signing and a native viewer, in one small binary"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/suffixing/apkscope"
 
 [dependencies]

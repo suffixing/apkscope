@@ -158,5 +158,6 @@ with undo.
 DEX parser, bytecode decoder, decompiler, deobfuscator, resource decoder, search index, APK signer,
 MCP server and viewer: all Rust, all from zero. Not a JADX fork, not a wrapper.
 
-Found wrong output? Open an issue with the class name and what JADX shows. MIT licensed, see
-[LICENSE](LICENSE). `src/data/android_public.txt` comes from AOSP (Apache 2.0).
+Found wrong output? Open an issue with the class name and what JADX shows. Licensed under
+[Apache 2.0](LICENSE); "apkscope" and its logo are trademarks of Ahmad, see [NOTICE](NOTICE).
+`src/data/android_public.txt` comes from AOSP (Apache 2.0).

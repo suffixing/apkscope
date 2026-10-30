@@ -1,0 +1,11 @@
+apkscope
+Copyright 2026 Ahmad
+
+This product includes software developed by Ahmad (https://github.com/suffixing/apkscope).
+
+"apkscope" and the apkscope logo are trademarks of Ahmad. The Apache License 2.0 does not grant
+permission to use them (see section 6). Modified versions must use a different name and logo;
+they may say they are "based on apkscope".
+
+src/data/android_public.txt is generated from the Android Open Source Project and is licensed
+under the Apache License 2.0.
