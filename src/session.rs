@@ -497,7 +497,7 @@ impl State {
         for (d, dx) in self.dexes.iter().enumerate() {
             for id in 0..dx.counts()[0] {
                 let Ok(s) = dx.string(id as u32) else { continue };
-                if s.to_lowercase().contains(&low) {
+                if !s.trim().is_empty() && s.to_lowercase().contains(&low) {
                     let users = idx.map_or(0, |i| i.users(d, index::STRING, id).len());
                     out.push((s, users));
                     if out.len() >= limit {

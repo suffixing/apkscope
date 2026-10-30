@@ -196,6 +196,171 @@ pub fn field_access(dexes: &[Dex], class: &str, name: &str) -> Vec<(String, Stri
     out
 }
 
+// ---------- readable reports for the viewer ----------
+
+/// Where a report line leads: open method `at`, then (optionally) the line in it that mentions
+/// `then` (the call or field use). `method` = the method the line itself names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub at: String,
+    pub then: Option<String>,
+    pub method: Option<String>,
+}
+
+pub type Line = (String, Option<Link>);
+
+/// `I` -> `int`, `La/b/C$D;` -> `D` (shown names), `[B` -> `byte[]`
+fn short_type(t: &str) -> String {
+    match t.strip_prefix('[') {
+        Some(inner) => format!("{}[]", short_type(inner)),
+        None => match t {
+            "I" => "int".into(), "Z" => "boolean".into(), "B" => "byte".into(), "S" => "short".into(), "C" => "char".into(),
+            "J" => "long".into(), "F" => "float".into(), "D" => "double".into(), "V" => "void".into(),
+            _ => dex::java_name(t).rsplit(['.', '$']).next().unwrap_or(t).to_string(),
+        },
+    }
+}
+
+pub fn split_params(p: &str) -> Vec<String> {
+    let (b, mut out, mut i) = (p.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        let s = i;
+        while b[i] == b'[' {
+            i += 1;
+        }
+        if b[i] == b'L' {
+            i += p[i..].find(';').map_or(p.len() - i, |k| k + 1);
+        } else {
+            i += 1;
+        }
+        out.push(p[s..i.min(p.len())].to_string());
+    }
+    out
+}
+
+/// Method ref `La/b/C;->m(ILjava/lang/String;)V` as shown in the code:
+/// (`C` with its outer classes, `m(int, String)`, shown method name).
+pub fn pretty(mref: &str) -> (String, String, String) {
+    let Some((cls, rest)) = mref.split_once("->") else { return (mref.to_string(), String::new(), String::new()) };
+    let class = dex::java_name(cls).rsplit('.').next().unwrap_or("").replace('$', ".");
+    let (name, sig) = rest.split_once('(').unwrap_or((rest, ")"));
+    let params = sig.split(')').next().unwrap_or("");
+    let shown = match name {
+        "<init>" => format!("new {}", class.rsplit('.').next().unwrap_or("")),
+        "<clinit>" => "static {}".into(),
+        n => crate::deobf::method(cls, n).unwrap_or_else(|| n.to_string()),
+    };
+    let args = split_params(params).iter().map(|t| short_type(t)).collect::<Vec<_>>().join(", ");
+    (class, format!("{shown}({args})"), shown)
+}
+
+/// The text to look for at a call site of `mref`: `name(` (constructors: `new C(`).
+fn call_needle(mref: &str) -> String {
+    let (class, _, shown) = pretty(mref);
+    if shown.starts_with("new ") { format!("new {}(", class.rsplit('.').next().unwrap_or("")) } else { format!("{shown}(") }
+}
+
+/// Callers grouped by class; each line jumps to the call.
+pub fn callers_report(dexes: &[Dex], class: &str, name: Option<&str>) -> Vec<Line> {
+    let rows = callers(dexes, class, name);
+    let classes: HashSet<&str> = rows.iter().map(|r| r.0.split("->").next().unwrap_or("")).collect();
+    let target = rows.first().map(|r| pretty(&r.1)).map_or(format!("{}{}", short_type(&desc(class)), name.map(|n| format!(".{n}")).unwrap_or_default()), |p| format!("{}.{}", p.0, if name.is_some() { p.1 } else { "*".into() }));
+    let mut out: Vec<Line> = vec![
+        (format!("// Callers of {target}"), None),
+        (format!("// {} call sites in {} classes. Click a line to jump to the call.", rows.len(), classes.len()), None),
+        (String::new(), None),
+    ];
+    if rows.is_empty() {
+        out.push(("// none found: entry point, framework callback, reflection or JNI".into(), None));
+    }
+    let mut last = String::new();
+    for (from, to) in rows {
+        let (c, sig, _) = pretty(&from);
+        if c != last {
+            out.push((String::new(), None));
+            out.push((format!("{c}"), Some(Link { at: from.clone(), then: None, method: None })));
+            last = c;
+        }
+        let callee = pretty(&to);
+        let via = if name.is_none() || callee.2 != name.unwrap_or("") { format!("    calls {}", callee.1) } else { String::new() };
+        out.push((format!("    {sig}{via}"), Some(Link { at: from.clone(), then: Some(call_needle(&to)), method: Some(from) })));
+    }
+    out
+}
+
+/// Callers, then the callee tree drawn with branches; [lib] = outside the APK.
+pub fn graph_report(dexes: &[Dex], class: &str, name: Option<&str>, depth: usize) -> Vec<Line> {
+    let mut out = callers_report(dexes, class, name);
+    out.push((String::new(), None));
+    out.push((format!("// Calls made (depth {depth}). Click a line to jump to the call; [lib] = Android / Java API, ↺ = shown above."), None));
+    let mut roots: Vec<String> = callees(dexes, class, name).into_iter().map(|x| x.0).collect();
+    roots.dedup();
+    let mut seen = HashSet::new();
+    fn walk(dexes: &[Dex], m: &str, parent: Option<&str>, prefix: &str, last: bool, d: usize, max: usize, seen: &mut HashSet<String>, out: &mut Vec<Line>) {
+        let (c, sig, _) = pretty(m);
+        let branch = if parent.is_none() { "" } else if last { "└─ " } else { "├─ " };
+        let link = Some(match parent {
+            Some(p) => Link { at: p.to_string(), then: Some(call_needle(m)), method: Some(m.to_string()) },
+            None => Link { at: m.to_string(), then: None, method: Some(m.to_string()) },
+        });
+        let code = find_code(dexes, m);
+        let tag = if code.is_none() { "   [lib]" } else if seen.contains(m) { "   ↺" } else { "" };
+        out.push((format!("{prefix}{branch}{c}.{sig}{tag}"), link));
+        let Some((dx, _, insns)) = code else { return };
+        if !seen.insert(m.to_string()) || d >= max {
+            return;
+        }
+        let mut kids = Vec::new();
+        bytecode::for_each_ref(insns, |r, idx| {
+            if let (Ref::Method, Ok(s)) = (r, dx.method_ref(idx)) {
+                if !kids.contains(&s) {
+                    kids.push(s);
+                }
+            }
+        });
+        let child_prefix = if parent.is_none() { String::new() } else { format!("{prefix}{}", if last { "   " } else { "│  " }) };
+        let n = kids.len();
+        for (k, kid) in kids.iter().enumerate() {
+            walk(dexes, kid, Some(m), &child_prefix, k + 1 == n, d + 1, max, seen, out);
+        }
+    }
+    for r in &roots {
+        out.push((String::new(), None));
+        walk(dexes, r, None, "", true, 0, depth, &mut seen, &mut out);
+    }
+    out
+}
+
+pub fn access_report(dexes: &[Dex], class: &str, field: &str) -> Vec<Line> {
+    let rows = field_access(dexes, class, field);
+    let shown = field;
+    let (w, r) = (rows.iter().filter(|x| x.2).count(), rows.iter().filter(|x| !x.2).count());
+    let mut out: Vec<Line> = vec![(format!("// {}.{shown}: {w} writes, {r} reads. Click a line to jump to it.", short_type(&desc(class))), None)];
+    for write in [true, false] {
+        out.push((String::new(), None));
+        out.push((if write { "// written by" } else { "// read by" }.into(), None));
+        for (m, f, _) in rows.iter().filter(|x| x.2 == write) {
+            let (c, sig, _) = pretty(m);
+            let fname = f.split("->").nth(1).and_then(|x| x.split(':').next()).unwrap_or(field);
+            let (owner, ty) = (f.split("->").next().unwrap_or(""), f.rsplit(':').next().unwrap_or(""));
+            let needle = crate::deobf::field(owner, fname, ty).unwrap_or_else(|| fname.to_string());
+            out.push((format!("    {c}.{sig}"), Some(Link { at: m.clone(), then: Some(needle), method: Some(m.clone()) })));
+        }
+    }
+    out
+}
+
+pub fn decrypt_report(dexes: &[Dex]) -> Vec<Line> {
+    let rows = decrypt_all(dexes);
+    let mut out: Vec<Line> = vec![(format!("// {} decryptor calls with constant arguments. Click a line to jump to the call.", rows.len()), None), (String::new(), None)];
+    for (at, f, p) in rows {
+        let (c, sig, _) = pretty(&at);
+        out.push((format!("{}  =  {}", crate::session::json_str(&p), pretty(&f).1), Some(Link { at: at.clone(), then: Some(call_needle(&f)), method: None })));
+        out.push((format!("    in {c}.{sig}"), Some(Link { at, then: Some(call_needle(&f)), method: None })));
+    }
+    out
+}
+
 // ---------- Frida ----------
 
 /// Descriptor -> the type name Frida's `overload()` wants.
@@ -1255,6 +1420,14 @@ mod tests {
         assert_eq!(frida_type("Ljava/lang/String;"), "java.lang.String");
         assert_eq!(frida_type("[B"), "[B");
         assert_eq!(frida_type("[Ljava/lang/String;"), "[Ljava.lang.String;");
+    }
+
+    #[test]
+    fn readable_method_names() {
+        let (c, sig, shown) = pretty("La/b/Outer$In;->run(I[BLjava/lang/String;)V");
+        assert_eq!((c.as_str(), sig.as_str(), shown.as_str()), ("Outer.In", "run(int, byte[], String)", "run"));
+        assert_eq!(pretty("La/B;-><init>()V").1, "new B()");
+        assert_eq!(call_needle("La/B;-><init>()V"), "new B(");
     }
 
     #[test]

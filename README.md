@@ -163,10 +163,22 @@ exported components, risky flags, signature), your app's code apart from the lib
 built for API work, native library reports with JNI methods decoded, and **Edit → Build & sign**
 with undo.
 
-Right-click a class, method or field in the code for **Callers**, **Call graph**, **Reads & writes**,
-**Show Smali** (also on a `WARNING` header), **Frida hook**, **Rename** and **Comment**. Renames
-and comments are saved next to the APK and come back next time. **Security scan** and **Decrypt
-strings** are in the top bar. In any result tab, right-click a line to jump to that code.
+Working in the code:
+
+- **Click a name** to mark it everywhere in the file (Esc clears it). **Ctrl+click** a class or a
+  call to go to its definition.
+- **Right-click anything.** On a class name (`new Login()` too) you get Open, *Where it's created*,
+  Callers and Usages. On a call: Go to definition, Callers, Call graph, Frida hook. On a field: Reads
+  & writes. On a declaration: Show Smali (also from a `WARNING` header), Rename and Comment.
+- **Callers, call graphs and field access** open as readable tabs: names as they appear in the code,
+  grouped by class, the graph drawn as a tree. Click a line to land **on the exact line of the call**,
+  not just the method.
+- **Back / Forward** with Alt+←/→, the mouse side buttons, or ◀ ▶ next to the tabs.
+- **Tabs**: right-click for Close others, Close tabs to the left/right, Close all. Middle-click closes one.
+- **Search results** are grouped by class and can be folded, filtered, and show the match highlighted.
+  Opening one marks the searched name in the code.
+- **Rename** and **Comment** are saved next to the APK and come back next time. **Security scan** and
+  **Decrypt strings** are in the top bar.
 
 ## Honest limits
 

@@ -8,6 +8,7 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, RichText, Stroke, TextFormat, text::LayoutJob};
 
 use crate::{apksign, arsc, cache, rebuild};
+use crate::re::{Line, Link};
 use crate::session::{self, Format, Hit, Matcher, Origin, Progress, Scope, State};
 
 // ---------- settings ----------
@@ -207,18 +208,36 @@ struct Doc {
     open: Open,
     view: View,
     text: Option<Arc<String>>,
+    /// per line of a report: where clicking it leads
+    links: Option<Arc<Vec<Option<Link>>>>,
     /// 1-based line to scroll to and mark
     mark: Option<usize>,
     scroll_pending: bool,
-    /// highlighted text and what it was built for: (background, font size x10, marked line)
-    job: Option<((Color32, u32, Option<usize>), LayoutJob)>,
+    /// highlighted text and what it was built for: (background, font size x10, marked line, selected word)
+    job: Option<((Color32, u32, Option<usize>, Option<String>), LayoutJob)>,
+    /// identifier clicked in the code, marked everywhere in the file
+    sel: Option<String>,
     find: String,
     /// manifest text being edited, when in edit mode
     editing: Option<String>,
-    /// text to jump to once the document's text arrives
-    find_on_load: Option<String>,
-    /// line (0-based) the context menu was opened on
-    menu_line: Option<usize>,
+    /// where to jump once the document's text arrives
+    find_on_load: Option<Target>,
+    /// line and column (0-based) the context menu was opened on
+    menu_at: Option<(usize, usize)>,
+}
+
+impl Doc {
+    fn new(open: Open) -> Doc {
+        Doc { open, view: View::Java, text: None, links: None, mark: None, scroll_pending: false, job: None, sel: None, find: String::new(), editing: None, find_on_load: None, menu_at: None }
+    }
+}
+
+/// A place inside a class's Java: a method declaration (shown name, parameter count), then
+/// optionally the first line after it that contains `then` (a call, a field use).
+#[derive(Clone)]
+struct Target {
+    decl: Option<(String, Option<usize>)>,
+    then: Option<String>,
 }
 
 /// "Rename" / "Comment" dialog
@@ -230,7 +249,7 @@ struct NoteDlg {
     text: String,
 }
 
-/// What a right-click on a line asked for.
+/// What a click or right-click in the code asked for.
 enum Act {
     Callers(String, Option<String>),
     Graph(String, Option<String>),
@@ -238,22 +257,46 @@ enum Act {
     Access(String, String),
     Smali(String, String),
     Note(String, bool, String),
-    GoTo(String),
+    GoTo(Link),
+    /// top-level class (Java name as listed), and where in it
+    OpenClass(String, Option<Target>),
+    /// 1-based line of the active tab
+    Line(usize),
+    Usages(String),
+}
+
+fn java_res() -> &'static [regex::Regex; 3] {
+    use std::sync::OnceLock;
+    static RE: OnceLock<[regex::Regex; 3]> = OnceLock::new();
+    RE.get_or_init(|| {
+        [
+            regex::Regex::new(r"^(\s*)(?:[\w@]+\s+)*(?:class|interface|enum|@interface)\s+([\w$]+)").unwrap(),
+            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?@]+\s+)*?([\w$]+)\((.*)\)\s*(?:throws [^{;]+)?\s*[{;]\s*$").unwrap(),
+            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?]+\s+)+([\w$]+)(?: = .*)?;(?:\s*//.*)?$").unwrap(),
+        ]
+    })
+}
+
+const NOT_DECL: [&str; 9] = ["if", "while", "for", "switch", "catch", "synchronized", "return", "new", "super"];
+
+/// A method_re match is a declaration, not a call statement: a type or modifier comes first.
+fn is_decl(l: &str, c: &regex::Captures) -> bool {
+    let pre = l[..c.get(2).map_or(0, |m| m.start())].trim();
+    let first = pre.split_whitespace().next().unwrap_or("");
+    // a constructor without modifiers: `Name(args) {`
+    let ctor = pre.is_empty() && c[2].starts_with(|ch: char| ch.is_uppercase()) && l.trim_end().ends_with('{');
+    (ctor || !pre.is_empty()) && !pre.ends_with('.') && !NOT_DECL.contains(&&c[2]) && !NOT_DECL.contains(&first) && first != "throw" && first != "else" && !l.contains(" = ")
+}
+
+fn indent(s: &str) -> usize {
+    s.len() - s.trim_start().len()
 }
 
 /// What sits on line `at` of decompiled Java: the chain of enclosing classes (as shown) and the
 /// member declared there, as (is_method, shown name). A comment above a declaration (such as a
 /// WARNING) points at that declaration.
 fn member_at(text: &str, at: usize) -> Option<(Vec<String>, Option<(bool, String)>)> {
-    use std::sync::OnceLock;
-    static RE: OnceLock<[regex::Regex; 3]> = OnceLock::new();
-    let [class_re, method_re, field_re] = RE.get_or_init(|| {
-        [
-            regex::Regex::new(r"^(\s*)(?:[\w@]+\s+)*(?:class|interface|enum|@interface)\s+([\w$]+)").unwrap(),
-            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?@]+\s+)*?([\w$]+)\((.*)\)\s*(?:throws [^{;]+)?\s*[{;]\s*$").unwrap(),
-            regex::Regex::new(r"^(\s+)(?:[\w$<>\[\],.?]+\s+)+([\w$]+)(?: = .*)?;(?:\s*//.*)?$").unwrap(),
-        ]
-    });
+    let [class_re, method_re, field_re] = java_res();
     let lines: Vec<&str> = text.lines().collect();
     let mut at = at.min(lines.len().checked_sub(1)?);
     while at + 1 < lines.len() && {
@@ -263,13 +306,11 @@ fn member_at(text: &str, at: usize) -> Option<(Vec<String>, Option<(bool, String
         at += 1;
     }
     let l = lines[at];
-    let indent = |s: &str| s.len() - s.trim_start().len();
-    const KW: [&str; 9] = ["if", "while", "for", "switch", "catch", "synchronized", "return", "new", "super"];
     let (member, own_indent) = if let Some(c) = class_re.captures(l) {
         (None, c[1].len() + 4)
-    } else if let Some(c) = method_re.captures(l).filter(|c| !KW.contains(&&c[2]) && !l.contains(" = ")) {
+    } else if let Some(c) = method_re.captures(l).filter(|c| is_decl(l, c)) {
         (Some((true, c[2].to_string())), c[1].len())
-    } else if let Some(c) = field_re.captures(l).filter(|c| !KW.contains(&&c[2])) {
+    } else if let Some(c) = field_re.captures(l).filter(|c| !NOT_DECL.contains(&&c[2])) {
         (Some((false, c[2].to_string())), c[1].len())
     } else {
         return None;
@@ -290,62 +331,263 @@ fn member_at(text: &str, at: usize) -> Option<(Vec<String>, Option<(bool, String
     (!chain.is_empty() && want == 0).then_some((chain, member))
 }
 
-/// Right-click menu for the line `doc.menu_line` of a tab; returns the chosen action.
+/// Classes enclosing any line (a statement inside a method too), innermost last.
+fn classes_around(text: &str, at: usize) -> Vec<String> {
+    let class_re = &java_res()[0];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut cur = lines.get(at).map_or(0, |l| indent(l)) + 1;
+    let mut chain = Vec::new();
+    for k in (0..=at.min(lines.len().saturating_sub(1))).rev() {
+        if let Some(c) = class_re.captures(lines[k]).filter(|_| indent(lines[k]) < cur) {
+            chain.push(c[2].to_string());
+            cur = indent(lines[k]);
+            if cur == 0 {
+                break;
+            }
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// 1-based line of the declaration of method `name` (with `nargs` parameters, if given).
+fn find_decl(text: &str, name: &str, nargs: Option<usize>) -> Option<usize> {
+    let re = &java_res()[1];
+    let mut first = None;
+    for (k, l) in text.lines().enumerate() {
+        let Some(c) = re.captures(l) else { continue };
+        if &c[2] != name || !is_decl(l, &c) {
+            continue;
+        }
+        let n = if c[3].trim().is_empty() { 0 } else { c[3].matches(',').count() + 1 };
+        if nargs.is_none_or(|w| w == n) {
+            return Some(k + 1);
+        }
+        first.get_or_insert(k + 1);
+    }
+    first
+}
+
+/// Line to show for a target: the declaration, then the first line after it with `then`.
+fn locate(text: &str, t: &Target) -> Option<usize> {
+    let decl = t.decl.as_ref().and_then(|(n, a)| find_decl(text, n, *a));
+    match (&t.then, decl) {
+        (Some(w), Some(d)) => {
+            // stay inside the method: stop at the next line indented like its declaration
+            let lines: Vec<&str> = text.lines().collect();
+            let ind = indent(lines[d - 1]);
+            let hit = lines.iter().enumerate().skip(d).take_while(|(_, l)| l.trim().is_empty() || indent(l) > ind || l.trim() == "}").find(|(_, l)| l.contains(w.as_str()));
+            Some(hit.map_or(d, |(k, _)| k + 1))
+        }
+        (Some(w), None) => find_next(text, w, 0),
+        (None, d) => d,
+    }
+}
+
+/// Identifier at (line, column) and what surrounds it: (word, followed by `(`, after `new `,
+/// receiver before a `.`).
+fn word_at(text: &str, line: usize, col: usize) -> Option<(String, bool, bool, Option<String>)> {
+    let l: Vec<char> = text.lines().nth(line)?.chars().collect();
+    let w = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    if !l.get(col).is_some_and(|&c| w(c)) {
+        return None;
+    }
+    let (mut s, mut e) = (col, col);
+    while s > 0 && w(l[s - 1]) {
+        s -= 1;
+    }
+    while e < l.len() && w(l[e]) {
+        e += 1;
+    }
+    let word: String = l[s..e].iter().collect();
+    if word.chars().next()?.is_ascii_digit() {
+        return None;
+    }
+    let call = l.get(e) == Some(&'(');
+    let before: String = l[..s].iter().collect();
+    let is_new = before.ends_with("new ");
+    let recv = before.strip_suffix('.').map(|b| b.chars().rev().take_while(|&c| w(c)).collect::<Vec<_>>().into_iter().rev().collect::<String>()).filter(|r| !r.is_empty());
+    Some((word, call, is_new, recv))
+}
+
+/// Top-level class (as listed) a simple name in `text` refers to: by its import, the tab's own
+/// package, or a unique name in the APK.
+fn resolve_class(st: &State, text: &str, top: &str, simple: &str) -> Option<String> {
+    let has = |n: &str| st.classes.binary_search_by(|c| c.0.as_str().cmp(n)).is_ok();
+    let suffix = format!(".{simple};");
+    if let Some(imp) = text.lines().take_while(|l| !l.contains(" class ") && !l.contains("interface ")).find(|l| l.starts_with("import ") && l.ends_with(&suffix)) {
+        let n = imp.trim_start_matches("import ").trim_end_matches(';');
+        if has(n) {
+            return Some(n.to_string());
+        }
+    }
+    let same = format!("{}.{simple}", top.rsplit_once('.').map_or("", |x| x.0));
+    if has(&same) {
+        return Some(same);
+    }
+    let mut it = st.classes.iter().filter(|c| c.0.rsplit('.').next() == Some(simple));
+    match (it.next(), it.next()) {
+        (Some(c), None) => Some(c.0.clone()),
+        _ => None,
+    }
+}
+
+/// Real descriptor of a class shown as the last of `chain` in tab `top`.
+fn owner_desc(st: &State, top: &str, chain: &[String]) -> Option<String> {
+    let &(_, d, c) = st.classes.iter().find(|x| x.0 == top)?;
+    let t = st.dexes[d].class_descriptor(c).ok()?;
+    Some(if chain.len() > 1 { crate::re::nested_class(&st.dexes, &t, chain.last()?) } else { t })
+}
+
+fn desc_of(st: &State, java: &str) -> Option<String> {
+    let &(_, d, c) = st.classes.iter().find(|x| x.0 == java)?;
+    st.dexes[d].class_descriptor(c).ok()
+}
+
+/// Ctrl+click: go to what the word names (class, or method declared in this file / its class).
+fn definition(st: &State, top: &str, text: &str, line: usize, col: usize) -> Option<Act> {
+    let (word, call, is_new, recv) = word_at(text, line, col)?;
+    if call && !is_new {
+        let in_file = recv.as_deref().is_none_or(|r| r == "this" || r == "super");
+        if in_file {
+            return find_decl(text, &word, None).map(Act::Line);
+        }
+        let cls = recv.as_deref().and_then(|r| resolve_class(st, text, top, r))?;
+        return Some(Act::OpenClass(cls, Some(Target { decl: Some((word, None)), then: None })));
+    }
+    if word.starts_with(|c: char| c.is_uppercase()) {
+        if let Some(c) = resolve_class(st, text, top, &word) {
+            return Some(Act::OpenClass(c, None));
+        }
+        // a nested class of this file
+        return text.lines().position(|l| java_res()[0].captures(l).is_some_and(|c| c[2] == word)).map(|k| Act::Line(k + 1));
+    }
+    None
+}
+
+/// Right-click menu for `doc.menu_at`; returns the chosen action.
 fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Option<Act> {
-    let at = doc.menu_line?;
-    let line = text.lines().nth(at).unwrap_or("");
+    let (at, col) = doc.menu_at?;
     let mut out = None;
     let mut pick = |ui: &mut egui::Ui, label: &str, a: Act| {
         if ui.button(label).clicked() {
             out = Some(a);
         }
     };
-    match &doc.open {
-        Open::Report(_) if line.contains(";->") || line.trim_start().starts_with('L') => pick(ui, "Open in code", Act::GoTo(line.to_string())),
-        Open::Class(top) if doc.view == View::Java => {
-            let st = st?;
-            let Some((chain, member)) = member_at(text, at) else {
-                ui.label("Right-click a class, method or field declaration");
-                return None;
-            };
-            let &(_, d, c) = st.classes.iter().find(|x| &x.0 == top)?;
-            let t = st.dexes[d].class_descriptor(c).ok()?;
-            let owner = if chain.len() > 1 { crate::re::nested_class(&st.dexes, &t, chain.last()?) } else { t };
-            let real = member.as_ref().and_then(|(m, n)| crate::re::real_member(&st.dexes, &owner, n, *m).map(|r| (*m, r, n.clone())));
-            match &real {
-                Some((true, name, shown)) => {
-                    ui.label(RichText::new(format!("{shown}()")).strong());
-                    pick(ui, "Callers", Act::Callers(owner.clone(), Some(name.clone())));
-                    pick(ui, "Call graph", Act::Graph(owner.clone(), Some(name.clone())));
-                    pick(ui, if line.contains("WARNING") { "Show this method in Smali" } else { "Show Smali" }, Act::Smali(top.clone(), name.clone()));
-                    pick(ui, "Frida hook (copy)", Act::Frida(owner.clone(), Some(name.clone())));
-                    ui.separator();
-                    pick(ui, "Rename…", Act::Note(format!("{owner}->{name}()"), false, format!("Rename method {shown}")));
-                    pick(ui, "Comment…", Act::Note(format!("{owner}->{name}()"), true, format!("Comment on {shown}()")));
+    let st = st?;
+    if let Open::Report(_) = &doc.open {
+        let link = doc.links.as_ref().and_then(|l| l.get(at).cloned().flatten());
+        match link {
+            Some(l) => {
+                if l.then.is_some() {
+                    pick(ui, "Go to the call", Act::GoTo(Link { method: None, ..l.clone() }));
                 }
-                Some((false, name, shown)) => {
-                    ui.label(RichText::new(shown.as_str()).strong());
-                    pick(ui, "Reads & writes", Act::Access(owner.clone(), name.clone()));
-                    ui.separator();
-                    pick(ui, "Rename…", Act::Note(format!("{owner}->{name}"), false, format!("Rename field {shown}")));
-                    pick(ui, "Comment…", Act::Note(format!("{owner}->{name}"), true, format!("Comment on {shown}")));
-                }
-                None if member.is_some() => {
-                    ui.label("Not found in the DEX (synthetic or inlined code)");
-                }
-                None => {
-                    let shown = chain.last().cloned().unwrap_or_default();
-                    ui.label(RichText::new(format!("class {shown}")).strong());
-                    pick(ui, "Callers (any method)", Act::Callers(owner.clone(), None));
-                    pick(ui, "Frida hooks (all methods, copy)", Act::Frida(owner.clone(), None));
-                    ui.separator();
-                    pick(ui, "Rename…", Act::Note(owner.clone(), false, format!("Rename class {shown} (a short name keeps the package)")));
-                    pick(ui, "Comment…", Act::Note(owner.clone(), true, format!("Comment on class {shown}")));
+                if let Some(m) = &l.method {
+                    pick(ui, "Open this method", Act::GoTo(Link { at: m.clone(), then: None, method: None }));
+                    if let Some((c, name)) = m.split_once("->").map(|(c, r)| (c.to_string(), r.split('(').next().unwrap_or("").to_string())) {
+                        pick(ui, "Its callers", Act::Callers(c.clone(), Some(name.clone())));
+                        pick(ui, "Its call graph", Act::Graph(c, Some(name)));
+                    }
                 }
             }
+            None => {
+                ui.label("Click a line with a method to jump there");
+            }
         }
-        _ => {
-            ui.label("Nothing to do on this line");
+        return out;
+    }
+    let Open::Class(top) = &doc.open else {
+        ui.label("Nothing to do here");
+        return None;
+    };
+    if doc.view == View::Smali {
+        ui.label("Switch to Java for code actions");
+        return None;
+    }
+    let line = text.lines().nth(at).unwrap_or("");
+    // the word under the cursor: a class, a call or a name
+    let decl = member_at(text, at);
+    if let Some((word, call, is_new, recv)) = word_at(text, at, col) {
+        let is_decl_name = decl.as_ref().is_some_and(|(c, m)| m.as_ref().map_or(c.last() == Some(&word), |m| m.1 == word));
+        if !is_decl_name {
+            let class = if word.starts_with(|c: char| c.is_uppercase()) && !call || is_new { resolve_class(st, text, top, &word) } else { None };
+            if let Some(cls) = &class {
+                ui.label(RichText::new(format!("class {word}")).strong());
+                pick(ui, "Open class   (Ctrl+click)", Act::OpenClass(cls.clone(), None));
+                if let Some(d) = desc_of(st, cls) {
+                    pick(ui, &format!("Where {word} is created (new {word})"), Act::Callers(d.clone(), Some("<init>".into())));
+                    pick(ui, &format!("Callers of any {word} method"), Act::Callers(d, None));
+                }
+                pick(ui, "Find usages", Act::Usages(word.clone()));
+                ui.separator();
+            } else if call {
+                ui.label(RichText::new(format!("{word}()")).strong());
+                let owner = match recv.as_deref() {
+                    None | Some("this" | "super") => owner_desc(st, top, &classes_around(text, at)),
+                    Some(r) => resolve_class(st, text, top, r).and_then(|c| desc_of(st, &c)),
+                };
+                let real = owner.as_ref().and_then(|o| crate::re::real_member(&st.dexes, o, &word, true).map(|n| (o.clone(), n)));
+                if let Some(a) = definition(st, top, text, at, col) {
+                    pick(ui, "Go to definition   (Ctrl+click)", a);
+                }
+                if let Some((o, n)) = real {
+                    pick(ui, "Callers", Act::Callers(o.clone(), Some(n.clone())));
+                    pick(ui, "Call graph", Act::Graph(o.clone(), Some(n.clone())));
+                    pick(ui, "Frida hook (copy)", Act::Frida(o, Some(n)));
+                }
+                pick(ui, "Find usages", Act::Usages(word.clone()));
+                ui.separator();
+            } else if !KEYWORDS.contains(&word.as_str()) {
+                ui.label(RichText::new(word.as_str()).strong());
+                let owner = owner_desc(st, top, &classes_around(text, at));
+                if let Some(o) = owner.filter(|o| crate::re::real_member(&st.dexes, o, &word, false).is_some()) {
+                    let n = crate::re::real_member(&st.dexes, &o, &word, false).unwrap_or_default();
+                    pick(ui, "Reads & writes of this field", Act::Access(o, n));
+                }
+                pick(ui, "Find usages in the app", Act::Usages(word.clone()));
+                ui.label(RichText::new("Click a name to mark it everywhere in this file").small());
+                ui.separator();
+            }
+        }
+    }
+    let Some((chain, member)) = decl else {
+        if out.is_none() && word_at(text, at, col).is_none() {
+            ui.label("Right-click a name, or a class, method or field declaration");
+        }
+        return out;
+    };
+    let owner = owner_desc(st, top, &chain)?;
+    let real = member.as_ref().and_then(|(m, n)| crate::re::real_member(&st.dexes, &owner, n, *m).map(|r| (*m, r, n.clone())));
+    match &real {
+        Some((true, name, shown)) => {
+            ui.label(RichText::new(format!("method {shown}()")).strong());
+            pick(ui, "Callers", Act::Callers(owner.clone(), Some(name.clone())));
+            pick(ui, "Call graph", Act::Graph(owner.clone(), Some(name.clone())));
+            pick(ui, if line.contains("WARNING") { "Show this method in Smali" } else { "Show Smali" }, Act::Smali(top.clone(), name.clone()));
+            pick(ui, "Frida hook (copy)", Act::Frida(owner.clone(), Some(name.clone())));
+            ui.separator();
+            pick(ui, "Rename…", Act::Note(format!("{owner}->{name}()"), false, format!("Rename method {shown}")));
+            pick(ui, "Comment…", Act::Note(format!("{owner}->{name}()"), true, format!("Comment on {shown}()")));
+        }
+        Some((false, name, shown)) => {
+            ui.label(RichText::new(format!("field {shown}")).strong());
+            pick(ui, "Reads & writes", Act::Access(owner.clone(), name.clone()));
+            ui.separator();
+            pick(ui, "Rename…", Act::Note(format!("{owner}->{name}"), false, format!("Rename field {shown}")));
+            pick(ui, "Comment…", Act::Note(format!("{owner}->{name}"), true, format!("Comment on {shown}")));
+        }
+        None if member.is_some() => {
+            ui.label("Not found in the DEX (synthetic or inlined code)");
+        }
+        None => {
+            let shown = chain.last().cloned().unwrap_or_default();
+            ui.label(RichText::new(format!("class {shown}")).strong());
+            pick(ui, &format!("Where {shown} is created"), Act::Callers(owner.clone(), Some("<init>".into())));
+            pick(ui, "Callers (any method)", Act::Callers(owner.clone(), None));
+            pick(ui, "Frida hooks (all methods, copy)", Act::Frida(owner.clone(), None));
+            ui.separator();
+            pick(ui, "Rename…", Act::Note(owner.clone(), false, format!("Rename class {shown} (a short name keeps the package)")));
+            pick(ui, "Comment…", Act::Note(owner.clone(), true, format!("Comment on class {shown}")));
         }
     }
     out
@@ -354,8 +596,10 @@ fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Op
 enum Msg {
     Loaded(Result<State, String>),
     Text(Open, View, String),
+    Report(Open, Vec<Line>),
     Hits(u64, Vec<Hit>),
-    Strings(Vec<(String, usize)>),
+    /// (query, matching strings)
+    Strings(String, Vec<(String, usize)>),
     Saved(Result<String, String>),
 }
 
@@ -411,6 +655,8 @@ pub struct App {
     side: Side,
     filter: String,
     strings_q: String,
+    /// query the shown strings were listed for
+    strings_for: Option<String>,
     strings: Vec<(String, usize)>,
     natives: Option<Vec<(String, u64)>>,
     files: Option<Vec<(String, u64, u64)>>,
@@ -438,6 +684,12 @@ pub struct App {
     cache_size: Option<u64>,
     styled: Option<(Theme, u32)>,
     note_dlg: Option<NoteDlg>,
+    /// navigation history: (tab, view, marked line)
+    back: Vec<(Open, View, Option<usize>)>,
+    fwd: Vec<(Open, View, Option<usize>)>,
+    /// search results: classes folded away, and a filter over the hits
+    folded: std::collections::HashSet<String>,
+    hits_filter: String,
     titled: bool,
     logo: Option<egui::TextureHandle>,
 }
@@ -471,6 +723,7 @@ impl App {
             side: Side::Classes,
             filter: String::new(),
             strings_q: String::new(),
+            strings_for: None,
             strings: vec![],
             natives: None,
             files: None,
@@ -496,6 +749,10 @@ impl App {
             cache_size: None,
             styled: None,
             note_dlg: None,
+            back: vec![],
+            fwd: vec![],
+            folded: Default::default(),
+            hits_filter: String::new(),
             titled: false,
             logo: None,
         };
@@ -535,7 +792,7 @@ impl App {
         let k = match self.docs.iter().position(|d| d.open == what) {
             Some(k) => k,
             None => {
-                self.docs.push(Doc { open: what.clone(), view: View::Java, text: None, mark: None, scroll_pending: false, job: None, find: String::new(), editing: None, find_on_load: None, menu_line: None });
+                self.docs.push(Doc::new(what.clone()));
                 self.docs.len() - 1
             }
         };
@@ -567,49 +824,77 @@ impl App {
         });
     }
 
-    /// Open a generated text in its own tab, computed off the UI thread.
-    fn report(&mut self, title: String, f: impl FnOnce(&'static State) -> String + Send + 'static) {
+    /// Open a generated report in its own tab, computed off the UI thread. Lines with a link
+    /// jump to the code when clicked.
+    fn report(&mut self, title: String, f: impl FnOnce(&'static State) -> Vec<Line> + Send + 'static) {
         let Some(st) = self.st else { return };
+        self.push_nav();
         let open = Open::Report(title);
         self.docs.retain(|d| d.open != open);
-        self.docs.push(Doc { open: open.clone(), view: View::Java, text: None, mark: None, scroll_pending: false, job: None, find: String::new(), editing: None, find_on_load: None, menu_line: None });
+        self.docs.push(Doc::new(open.clone()));
         self.active = self.docs.len() - 1;
         let tx = self.tx.clone();
         spawn(move || {
-            let _ = tx.send(Msg::Text(open, View::Java, f(st)));
+            let _ = tx.send(Msg::Report(open, f(st)));
         });
     }
 
-    /// Open the class a method ref (`La/b$C;->name(...)`) lives in, at that method.
-    fn go_to(&mut self, line: &str) {
-        let Some(st) = self.st else { return };
-        let re = regex::Regex::new(r"(L[^;\s]+;)(?:->([\w$<>]+))?").unwrap();
-        let Some((desc, name)) = re.captures(line).map(|c| (c[1].to_string(), c.get(2).map(|x| x.as_str().to_string()))) else { return };
-        let top = desc.find('$').map_or(desc.clone(), |k| format!("{};", &desc[..k]));
-        let Some(n) = st.classes.iter().find(|x| st.dexes[x.1].class_descriptor(x.2).ok().as_deref() == Some(top.as_str())).map(|x| x.0.clone()) else {
-            self.toast(format!("{desc} is not in this APK"));
-            return;
-        };
-        self.open(Open::Class(n), Some(View::Java), None);
-        let needle = match name.as_deref() {
-            Some("<init>" | "<clinit>") | None => crate::dex::java_name(&desc).rsplit(['.', '$']).next().unwrap_or("").to_string(),
-            Some(nm) => crate::deobf::method(&desc, nm).unwrap_or_else(|| nm.to_string()),
-        };
-        self.find_in_active(format!(" {needle}("));
+    /// Remember where we are before jumping somewhere else (Back = Alt+Left).
+    fn push_nav(&mut self) {
+        if let Some(d) = self.docs.get(self.active) {
+            self.back.push((d.open.clone(), d.view, d.mark));
+            self.fwd.clear();
+            if self.back.len() > 100 {
+                self.back.remove(0);
+            }
+        }
     }
 
-    /// Jump to `needle` in the active tab now, or once its text arrives.
-    fn find_in_active(&mut self, needle: String) {
+    fn nav(&mut self, forward: bool) {
+        let (from, to) = if forward { (&mut self.fwd, &mut self.back) } else { (&mut self.back, &mut self.fwd) };
+        let Some((o, v, m)) = from.pop() else { return };
+        if let Some(d) = self.docs.get(self.active) {
+            to.push((d.open.clone(), d.view, d.mark));
+        }
+        if matches!(o, Open::Report(_)) && !self.docs.iter().any(|d| d.open == o) {
+            return; // closed report: nothing to go back to
+        }
+        self.open(o, Some(v), m);
+    }
+
+    /// Open a link's method, at the call or field use it points to.
+    fn go_to(&mut self, l: &Link) {
+        let Some(st) = self.st else { return };
+        let Some((desc, rest)) = l.at.split_once("->") else { return };
+        let top = desc.find('$').map_or(desc.to_string(), |k| format!("{};", &desc[..k]));
+        let Some(n) = st.classes.iter().find(|x| st.dexes[x.1].class_descriptor(x.2).ok().as_deref() == Some(top.as_str())).map(|x| x.0.clone()) else {
+            self.toast(format!("{} is not in this APK", crate::dex::java_name(desc)));
+            return;
+        };
+        let name = rest.split('(').next().unwrap_or("");
+        let shown = match name {
+            "<init>" => crate::dex::java_name(desc).rsplit(['.', '$']).next().unwrap_or("").to_string(),
+            n => crate::deobf::method(desc, n).unwrap_or_else(|| n.to_string()),
+        };
+        let nargs = rest.split_once('(').map(|x| crate::re::split_params(x.1.split(')').next().unwrap_or("")).len());
+        let decl = (name != "<clinit>").then_some((shown, nargs));
+        self.push_nav();
+        self.open(Open::Class(n), Some(View::Java), None);
+        self.find_in_active(Target { decl, then: l.then.clone() });
+    }
+
+    /// Jump to a target in the active tab now, or once its text arrives.
+    fn find_in_active(&mut self, t: Target) {
         let Some(d) = self.docs.get_mut(self.active) else { return };
         match &d.text {
-            Some(t) => {
-                if let Some(l) = find_next(t, &needle, 0) {
+            Some(text) => {
+                if let Some(l) = locate(text, &t) {
                     d.mark = Some(l);
                     d.scroll_pending = true;
                     d.job = None;
                 }
             }
-            None => d.find_on_load = Some(needle),
+            None => d.find_on_load = Some(t),
         }
     }
 
@@ -648,35 +933,41 @@ impl App {
         let Some(st) = self.st else { return };
         let short = |c: &str, m: &Option<String>| format!("{}{}", crate::dex::java_name(c).rsplit('.').next().unwrap_or(""), m.as_ref().map(|m| format!(".{m}")).unwrap_or_default());
         match a {
-            Act::Callers(c, m) => self.report(format!("Callers of {}", short(&c, &m)), move |st| {
-                let rows = crate::re::callers(&st.dexes, &c, m.as_deref());
-                let mut o = format!("// {} call sites. Right-click a line to open it.\n", rows.len());
-                for (f, t) in rows {
-                    o += &format!("{f}\n    -> {t}\n");
-                }
-                o
-            }),
-            Act::Graph(c, m) => self.report(format!("Call graph {}", short(&c, &m)), move |st| crate::re::call_graph(&st.dexes, &c, m.as_deref(), 3)),
-            Act::Access(c, f) => self.report(format!("Access {}", short(&c, &Some(f.clone()))), move |st| {
-                let rows = crate::re::field_access(&st.dexes, &c, &f);
-                let mut o = format!("// {} reads / writes. Right-click a line to open it.\n", rows.len());
-                for (m, _, w) in rows {
-                    o += &format!("{}  {m}\n", if w { "write" } else { "read " });
-                }
-                o
-            }),
+            Act::Callers(c, m) => {
+                let title = if m.as_deref() == Some("<init>") { format!("new {}", short(&c, &None)) } else { format!("Callers {}", short(&c, &m)) };
+                self.report(title, move |st| crate::re::callers_report(&st.dexes, &c, m.as_deref()))
+            }
+            Act::Graph(c, m) => self.report(format!("Graph {}", short(&c, &m)), move |st| crate::re::graph_report(&st.dexes, &c, m.as_deref(), 3)),
+            Act::Access(c, f) => self.report(format!("Access {}", short(&c, &Some(f.clone()))), move |st| crate::re::access_report(&st.dexes, &c, &f)),
             Act::Frida(c, m) => match crate::re::frida(&st.dexes, &c, m.as_deref()) {
                 Ok(js) => {
                     ctx.copy_text(js.clone());
-                    self.report(format!("Frida {}", short(&c, &m)), move |_| js);
+                    self.report(format!("Frida {}", short(&c, &m)), move |_| js.lines().map(|l| (l.to_string(), None)).collect());
                     self.toast("Frida script copied to the clipboard");
                 }
                 Err(e) => self.toast(e),
             },
             Act::Smali(class_name, method) => {
+                self.push_nav();
                 self.open(Open::Class(class_name), Some(View::Smali), None);
-                self.find_in_active(format!(" {method}("));
+                self.find_in_active(Target { decl: None, then: Some(format!(" {method}(")) });
             }
+            Act::OpenClass(name, target) => {
+                self.push_nav();
+                self.open(Open::Class(name), Some(View::Java), None);
+                if let Some(t) = target {
+                    self.find_in_active(t);
+                }
+            }
+            Act::Line(l) => {
+                self.push_nav();
+                if let Some(d) = self.docs.get_mut(self.active) {
+                    d.mark = Some(l);
+                    d.scroll_pending = true;
+                    d.job = None;
+                }
+            }
+            Act::Usages(w) => self.usages_of(&w),
             Act::Note(key, comment, label) => {
                 let n = crate::deobf::notes();
                 let class = !key.contains("->");
@@ -684,7 +975,7 @@ impl App {
                 let text = cur.map(|v| if !comment && class { crate::dex::java_name(v) } else { v.clone() }).unwrap_or_default();
                 self.note_dlg = Some(NoteDlg { key, comment, label, text });
             }
-            Act::GoTo(line) => self.go_to(&line),
+            Act::GoTo(l) => self.go_to(&l),
         }
     }
 
@@ -745,6 +1036,8 @@ impl App {
         }
         self.search_id += 1;
         self.search_err = None;
+        self.folded.clear();
+        self.hits_filter.clear();
         self.hits.clear();
         self.hits_title = if self.query.is_empty() { self.scope.label().to_string() } else { format!("{}: \"{}\"", self.scope.label(), self.query) };
         if self.app_only {
@@ -779,6 +1072,8 @@ impl App {
                         self.trees[k] = tree(mine.into_iter());
                     }
                     self.res = res_groups(st);
+                    self.strings_for = None;
+                    self.strings.clear();
                     self.st = Some(st);
                     spawn(move || st.build_index());
                     self.open(Open::Overview, None, None);
@@ -790,7 +1085,7 @@ impl App {
                 }
                 Msg::Text(open, view, text) => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.open == open && d.view == view) {
-                        if let Some(l) = d.find_on_load.take().and_then(|f| find_next(&text, &f, 0)) {
+                        if let Some(l) = d.find_on_load.take().and_then(|t| locate(&text, &t)) {
                             d.mark = Some(l);
                             d.scroll_pending = true;
                         }
@@ -798,13 +1093,24 @@ impl App {
                         d.job = None;
                     }
                 }
+                Msg::Report(open, lines) => {
+                    if let Some(d) = self.docs.iter_mut().find(|d| d.open == open) {
+                        let text: String = lines.iter().map(|l| format!("{}\n", l.0)).collect();
+                        d.links = Some(Arc::new(lines.into_iter().map(|l| l.1).collect()));
+                        d.text = Some(Arc::new(text));
+                        d.job = None;
+                    }
+                }
                 Msg::Hits(id, h) if id == self.search_id => {
                     self.prog = None;
                     self.hits = h;
+                    // stable: lines stay in order within a class
+                    self.hits.sort_by(|a, b| a.0.cmp(&b.0));
                     self.hits_secs = self.search_started.map_or(0.0, |t| t.elapsed().as_secs_f32());
                 }
                 Msg::Hits(..) => {}
-                Msg::Strings(v) => self.strings = v,
+                Msg::Strings(q, v) if self.strings_for.as_deref() == Some(q.as_str()) => self.strings = v,
+                Msg::Strings(..) => {}
                 Msg::Saved(Ok(s)) => self.toast(s),
                 Msg::Saved(Err(e)) => self.toast(format!("Export failed: {e}")),
             }
@@ -991,14 +1297,20 @@ impl App {
             return;
         }
         if self.side == Side::Strings {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.strings_q).hint_text("Find strings…  (Enter)").desired_width(f32::INFINITY));
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && self.strings_q.len() >= 2 {
+            ui.add(egui::TextEdit::singleline(&mut self.strings_q).hint_text("Filter strings…").desired_width(f32::INFINITY));
+            // list everything at first, then refilter as the user types (stale replies are dropped)
+            // the index adds usage counts: list again once it's ready
+            let key = format!("{} {}", self.strings_q, st.index.get().is_some());
+            if self.strings_for.as_deref() != Some(key.as_str()) {
+                self.strings_for = Some(key.clone());
                 let (tx, q) = (self.tx.clone(), self.strings_q.clone());
                 spawn(move || {
-                    let _ = tx.send(Msg::Strings(st.strings(&q, 5000)));
+                    let v = st.strings(&q, session::LIMIT);
+                    let _ = tx.send(Msg::Strings(key, v));
                 });
             }
-            ui.label(RichText::new("Every string constant in the app. Click one to find where it's used.").small().color(p.dim));
+            let more = if self.strings.len() >= session::LIMIT { format!("first {}", session::LIMIT) } else { self.strings.len().to_string() };
+            ui.label(RichText::new(format!("{more} strings{}. Click one to find where it's used.", if st.index.get().is_some() { " (number = classes using it)" } else { "" })).small().color(p.dim));
             ui.separator();
             let mut go = None;
             let row = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
@@ -1128,28 +1440,114 @@ impl App {
         ui.separator();
         let size = self.set.code_font - 0.5;
         let row = ui.fonts(|f| f.row_height(&FontId::monospace(size))) + 4.0;
-        egui::ScrollArea::both().auto_shrink(false).show_rows(ui, row, self.hits.len(), |ui, rows| {
-            for k in rows {
+        // hits grouped by class (they arrive sorted by class): a foldable header, then its lines
+        let flt = self.hits_filter.to_lowercase();
+        let keep = |h: &Hit| flt.is_empty() || h.0.to_lowercase().contains(&flt) || h.2.to_lowercase().contains(&flt);
+        let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+        for (k, h) in self.hits.iter().enumerate().filter(|(_, h)| keep(h)) {
+            match groups.last_mut() {
+                Some(g) if g.0 == h.0 => g.1.push(k),
+                _ => groups.push((&h.0, vec![k])),
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.hits_filter).hint_text("Filter results…").desired_width(220.0));
+            ui.label(RichText::new(format!("{} classes", groups.len())).color(p.dim));
+            if ui.small_button("Fold all").clicked() {
+                self.folded = groups.iter().map(|g| g.0.to_string()).collect();
+            }
+            if ui.small_button("Unfold all").clicked() {
+                self.folded.clear();
+            }
+        });
+        ui.separator();
+        // rows: (hit index, is header)
+        let mut rows: Vec<(usize, bool)> = Vec::new();
+        for (c, ks) in &groups {
+            rows.push((ks[0], true));
+            if !self.folded.contains(*c) {
+                rows.extend(ks.iter().filter(|&&k| !self.hits[k].2.is_empty()).map(|&k| (k, false)));
+            }
+        }
+        let counts: std::collections::HashMap<&str, usize> = groups.iter().map(|g| (g.0, g.1.iter().filter(|&&k| !self.hits[k].2.is_empty()).count())).collect();
+        // the query, to mark inside each line
+        let needle = (!self.use_regex && !self.query.is_empty()).then(|| if self.case { self.query.clone() } else { self.query.to_lowercase() });
+        let re = self.use_regex.then(|| regex::RegexBuilder::new(&self.query).case_insensitive(!self.case).build().ok()).flatten();
+        let mut fold = None;
+        let mono = FontId::monospace(size);
+        egui::ScrollArea::both().auto_shrink(false).show_rows(ui, row, rows.len(), |ui, range| {
+            for &(k, header) in &rows[range] {
                 let (t, ln, text) = &self.hits[k];
                 let mut job = LayoutJob::default();
-                let mono = FontId::monospace(size);
-                job.append(t, 0.0, TextFormat::simple(mono.clone(), p.accent));
-                if *ln > 0 {
-                    job.append(&format!(":{ln}"), 0.0, TextFormat::simple(mono.clone(), p.dim));
-                    job.append(text, 16.0, TextFormat::simple(mono, p.text));
+                if header {
+                    let n = counts.get(t.as_str()).copied().unwrap_or(0);
+                    let arrow = if n == 0 { "  " } else if self.folded.contains(t) { "▶ " } else { "▼ " };
+                    job.append(arrow, 0.0, TextFormat::simple(mono.clone(), p.dim));
+                    let (pkg, name) = t.rsplit_once(['.', '/']).map_or(("", t.as_str()), |x| x);
+                    job.append(name, 0.0, TextFormat::simple(mono.clone(), p.accent));
+                    if !pkg.is_empty() {
+                        job.append(&format!("  {pkg}"), 0.0, TextFormat::simple(mono.clone(), p.dim));
+                    }
+                    if n > 0 {
+                        job.append(&format!("  ({n})"), 0.0, TextFormat::simple(mono.clone(), p.dim));
+                    }
+                    let r = ui.add(egui::Label::new(job).sense(egui::Sense::click()).extend()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if r.clicked() {
+                        if n == 0 { go = Some((t.clone(), 0)) } else { fold = Some(t.clone()) }
+                    }
+                    if r.double_clicked() {
+                        go = Some((t.clone(), 0));
+                    }
+                    continue;
                 }
-                if ui.add(egui::Label::new(job).sense(egui::Sense::click()).extend()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let lnt = if *ln > 0 { ln.to_string() } else { String::new() };
+                job.append(&format!("    {lnt:>5}  "), 0.0, TextFormat::simple(mono.clone(), p.dim));
+                let line = text.trim();
+                // spans of the query in this line
+                let spans: Vec<(usize, usize)> = match (&needle, &re) {
+                    (Some(nd), _) => {
+                        let hay = if self.case { line.to_string() } else { line.to_lowercase() };
+                        // lowercasing can change byte lengths; only mark when it didn't
+                        if hay.len() == line.len() { hay.match_indices(nd.as_str()).map(|(i, m)| (i, i + m.len())).collect() } else { vec![] }
+                    }
+                    (_, Some(re)) => re.find_iter(line).map(|m| (m.start(), m.end())).collect(),
+                    _ => vec![],
+                };
+                let mut at = 0;
+                for (s0, e0) in spans {
+                    job.append(&line[at..s0], 0.0, TextFormat::simple(mono.clone(), p.text));
+                    let mut f = TextFormat::simple(mono.clone(), p.text);
+                    f.background = p.accent.gamma_multiply(0.38);
+                    job.append(&line[s0..e0], 0.0, f);
+                    at = e0;
+                }
+                job.append(&line[at..], 0.0, TextFormat::simple(mono.clone(), p.text));
+                if ui.add(egui::Label::new(job).sense(egui::Sense::click()).extend()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open at this line").clicked() {
                     go = Some((t.clone(), *ln));
                 }
             }
         });
+        if let Some(c) = fold {
+            if !self.folded.remove(&c) {
+                self.folded.insert(c);
+            }
+        }
         if let Some((t, ln)) = go {
             let o = match self.st {
                 Some(s) if s.is_native(&t) => Open::Native(t),
                 Some(s) if s.is_res(&t) => Open::Res(t),
                 _ => Open::Class(t),
             };
+            self.push_nav();
             self.open(o, Some(View::Java), (ln > 0).then_some(ln));
+            // mark the searched name in the opened code
+            let q = self.query.clone();
+            if let Some(d) = self.docs.get_mut(self.active) {
+                if !self.use_regex && !q.is_empty() && q.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+                    d.sel = Some(q);
+                    d.job = None;
+                }
+            }
         }
     }
 
@@ -1494,16 +1892,21 @@ const KEYWORDS: &[&str] = &[
 
 /// Java/Smali/XML colouring: comments, strings, keywords, numbers, smali directives.
 /// `mark` (1-based) gets a background, for jumping to a search hit.
-fn highlight(text: &str, p: &Palette, size: f32, mark: Option<usize>) -> LayoutJob {
+/// `sel` = identifier to mark everywhere (the word the user clicked).
+fn highlight(text: &str, p: &Palette, size: f32, mark: Option<usize>, sel: Option<&str>) -> LayoutJob {
     let font = FontId::monospace(size);
     let mut job = LayoutJob::default();
     let mut line = 1;
     let mut push = |job: &mut LayoutJob, s: &str, k: u8| {
         // split at newlines so only the marked line gets the background
         for piece in s.split_inclusive('\n') {
-            let mut f = TextFormat::simple(font.clone(), p.code[k as usize]);
+            let mut f = TextFormat::simple(font.clone(), p.code[(k % 6) as usize]);
             if Some(line) == mark {
                 f.background = p.mark;
+            }
+            // k >= 6: the selected word
+            if k >= 6 {
+                f.background = p.accent.gamma_multiply(0.38);
             }
             job.append(piece, 0.0, f);
             if piece.ends_with('\n') {
@@ -1533,7 +1936,9 @@ fn highlight(text: &str, p: &Palette, size: f32, mark: Option<usize>) -> LayoutJ
         } else if word(c) && (i == 0 || !word(b[i - 1])) {
             let e = i + b[i..].iter().position(|&c| !word(c)).unwrap_or(b.len() - i);
             let w = &text[i..e];
-            if KEYWORDS.contains(&w) {
+            if Some(w) == sel {
+                Some((e, 6))
+            } else if KEYWORDS.contains(&w) {
                 Some((e, 3))
             } else if c.is_ascii_digit() {
                 Some((e, 4))
@@ -1590,6 +1995,25 @@ impl eframe::App for App {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W)) && !self.docs.is_empty() {
             self.close(self.active);
         }
+        let (back, fwd) = ctx.input(|i| {
+            (
+                i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) || i.pointer.button_pressed(egui::PointerButton::Extra1),
+                i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) || i.pointer.button_pressed(egui::PointerButton::Extra2),
+            )
+        });
+        if back {
+            self.nav(false);
+        } else if fwd {
+            self.nav(true);
+        }
+        // Escape clears the marked word
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if let Some(d) = self.docs.get_mut(self.active) {
+                if d.sel.take().is_some() {
+                    d.job = None;
+                }
+            }
+        }
         egui::TopBottomPanel::top("bar").frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(10, 8))).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("apkscope").strong().size(16.0).color(p.accent));
@@ -1613,17 +2037,10 @@ impl eframe::App for App {
                     }
                 }
                 if ui.add_enabled(self.st.is_some(), egui::Button::new("Security scan")).on_hover_text("Manifest flags, exported components, risky APIs, weak crypto, TLS overrides, keys and URLs").clicked() {
-                    self.report("Security scan".into(), crate::re::scan);
+                    self.report("Security scan".into(), |st| crate::re::scan(st).lines().map(|l| (l.to_string(), None)).collect());
                 }
                 if ui.add_enabled(self.st.is_some(), egui::Button::new("Decrypt strings")).on_hover_text("Run string-decryptor methods on their constant arguments (also shown inline in the code as /* = \"...\" */)").clicked() {
-                    self.report("Decrypted strings".into(), |st| {
-                        let rows = crate::re::decrypt_all(&st.dexes);
-                        let mut o = format!("// {} decryptor calls with constant arguments. Right-click a line to open it.\n", rows.len());
-                        for (at, f, p) in rows {
-                            o += &format!("{at}\n    {f}  =>  {}\n", session::json_str(&p));
-                        }
-                        o
-                    });
+                    self.report("Decrypted strings".into(), |st| crate::re::decrypt_report(&st.dexes));
                 }
                 ui.separator();
                 egui::ComboBox::from_id_salt("scope").width(160.0).selected_text(self.scope.label()).show_ui(ui, |ui| {
@@ -1709,8 +2126,19 @@ impl eframe::App for App {
             // tab strip
             let mut close = None;
             let mut pick = None;
+            // (which tabs to close, relative to tab k): 0 others, 1 left, 2 right, 3 all
+            let mut close_many: Option<(usize, u8)> = None;
+            let mut go_nav = None;
             egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if ui.add_enabled(!self.back.is_empty(), egui::Button::new("◀").frame(false)).on_hover_text("Back (Alt+Left, mouse back)").clicked() {
+                        go_nav = Some(false);
+                    }
+                    if ui.add_enabled(!self.fwd.is_empty(), egui::Button::new("▶").frame(false)).on_hover_text("Forward (Alt+Right)").clicked() {
+                        go_nav = Some(true);
+                    }
+                    ui.separator();
+                    let n = self.docs.len();
                     for (k, d) in self.docs.iter().enumerate() {
                         let active = k == self.active;
                         let fill = if active { p.panel } else { Color32::TRANSPARENT };
@@ -1721,9 +2149,22 @@ impl eframe::App for App {
                                 if r.clicked() {
                                     pick = Some(k);
                                 }
-                                if r.middle_clicked() || ui.add(egui::Button::new(RichText::new("x").small().color(p.dim)).frame(false)).on_hover_text("Close (Ctrl+W)").clicked() {
+                                if r.middle_clicked() || ui.add(egui::Button::new(RichText::new("x").small().color(p.dim)).frame(false)).on_hover_text("Close (Ctrl+W, middle-click)").clicked() {
                                     close = Some(k);
                                 }
+                                r.context_menu(|ui| {
+                                    for (label, what, on) in [("Close", 9, true), ("Close others", 0, n > 1), ("Close tabs to the left", 1, k > 0), ("Close tabs to the right", 2, k + 1 < n), ("Close all", 3, true)] {
+                                        if ui.add_enabled(on, egui::Button::new(label)).clicked() {
+                                            if what == 9 { close = Some(k) } else { close_many = Some((k, what)) }
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    ui.separator();
+                                    if ui.button("Copy name").clicked() {
+                                        ui.ctx().copy_text(d.open.name().to_string());
+                                        ui.close_menu();
+                                    }
+                                });
                             });
                         });
                     }
@@ -1731,6 +2172,27 @@ impl eframe::App for App {
             });
             if let Some(k) = pick {
                 self.active = k;
+            }
+            if let Some(f) = go_nav {
+                self.nav(f);
+                return;
+            }
+            if let Some((k, what)) = close_many {
+                let keep = |i: usize| match what {
+                    0 => i == k,
+                    1 => i >= k,
+                    2 => i <= k,
+                    _ => false,
+                };
+                let mut i = 0;
+                self.docs.retain(|_| { let r = keep(i); i += 1; r });
+                self.active = match what {
+                    0 | 1 => 0,
+                    2 => k,
+                    _ => 0,
+                }
+                .min(self.docs.len().saturating_sub(1));
+                return;
             }
             if let Some(k) = close {
                 self.close(k);
@@ -1833,9 +2295,9 @@ impl eframe::App for App {
                     ui.add(egui::TextEdit::multiline(buf).code_editor().font(FontId::monospace(size)).desired_width(f32::INFINITY).desired_rows(40));
                 });
             } else if let Some(text) = doc.text.clone() {
-            let key = (pal.bg, (size * 10.0) as u32, doc.mark);
+            let key = (pal.bg, (size * 10.0) as u32, doc.mark, doc.sel.clone());
             if doc.job.as_ref().is_none_or(|j| j.0 != key) {
-                doc.job = Some((key, highlight(&text, &pal, size, doc.mark)));
+                doc.job = Some((key, highlight(&text, &pal, size, doc.mark, doc.sel.as_deref())));
             }
             let job = doc.job.as_ref().unwrap().1.clone();
             let mut area = egui::ScrollArea::both().id_salt(doc.open.name()).auto_shrink(false);
@@ -1846,10 +2308,34 @@ impl eframe::App for App {
                 }
             }
             let row = ui.fonts(|f| f.row_height(&FontId::monospace(size)));
+            let glyph = ui.fonts(|f| f.glyph_width(&FontId::monospace(size), 'M'));
+            let is_report = matches!(doc.open, Open::Report(_));
             area.show(ui, |ui| {
                 let r = ui.add(egui::Label::new(job).extend().selectable(true));
+                let at = r.interact_pointer_pos().or(r.hover_pos()).map(|p| (((p.y - r.rect.top()) / row).max(0.0) as usize, ((p.x - r.rect.left()) / glyph).max(0.0) as usize));
+                let link_here = |l: usize| doc.links.as_ref().and_then(|v| v.get(l).cloned().flatten());
+                if is_report && r.hovered() && r.hover_pos().is_some_and(|p| link_here(((p.y - r.rect.top()) / row).max(0.0) as usize).is_some()) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
                 if r.secondary_clicked() {
-                    doc.menu_line = r.interact_pointer_pos().map(|p| ((p.y - r.rect.top()) / row).max(0.0) as usize);
+                    doc.menu_at = at;
+                }
+                if r.clicked() {
+                    if let Some((l, c)) = at {
+                        let ctrl = ui.input(|i| i.modifiers.command);
+                        if is_report {
+                            // a click on a linked report line jumps to that code
+                            if let Some(link) = link_here(l) {
+                                act = Some(Act::GoTo(link));
+                            }
+                        } else if let (true, Open::Class(top), Some(st)) = (ctrl, &doc.open, st_now) {
+                            act = definition(st, top, &text, l, c);
+                        }
+                        // a click on a name marks it everywhere in the file; again to clear
+                        let w = word_at(&text, l, c).map(|w| w.0).filter(|w| !KEYWORDS.contains(&w.as_str()));
+                        doc.sel = if doc.sel == w { None } else { w };
+                        doc.job = None;
+                    }
                 }
                 r.context_menu(|ui| {
                     if let Some(a) = line_menu(ui, doc, &text, st_now) {
@@ -1926,7 +2412,7 @@ mod tests {
     #[test]
     fn highlight_splits_tokens_and_marks_line() {
         let p = Theme::Dark.palette();
-        let job = highlight("int x = 1; // hi\nString s = \"a\\\"b\";", &p, 13.0, Some(2));
+        let job = highlight("int x = 1; // hi\nString s = \"a\\\"b\";", &p, 13.0, Some(2), None);
         let parts: Vec<&str> = job.sections.iter().map(|s| &job.text[s.byte_range.clone()]).collect();
         assert!(parts.contains(&"int") && parts.contains(&"// hi") && parts.contains(&"\"a\\\"b\"") && parts.contains(&"1"), "{parts:?}");
         // only line 2 gets a background
@@ -1952,6 +2438,33 @@ mod tests {
         assert_eq!(member_at(java, 5), Some((vec!["Outer".into()], Some((true, "a".into())))));
         assert_eq!(member_at(java, 7), None);
         assert_eq!(member_at(java, 12), Some((vec!["Outer".into(), "In".into()], Some((true, "run".into())))));
+    }
+
+    #[test]
+    fn words_declarations_and_call_lines() {
+        let java = "public class A {
+    void run(int x) {
+        B b = new B();
+        b.go(x);
+        helper();
+    }
+
+    void helper() {
+        go();
+    }
+}
+";
+        assert_eq!(word_at(java, 2, 18), Some(("B".into(), true, true, None)));
+        assert_eq!(word_at(java, 3, 11), Some(("go".into(), true, false, Some("b".into()))));
+        assert_eq!(word_at(java, 3, 8), Some(("b".into(), false, false, None)));
+        assert_eq!(find_decl(java, "helper", Some(0)), Some(8));
+        assert_eq!(find_decl(java, "run", Some(1)), Some(2));
+        // the call inside `run`, not the declaration and not the `go()` in helper
+        let t = Target { decl: Some(("run".into(), Some(1))), then: Some("go(".into()) };
+        assert_eq!(locate(java, &t), Some(4));
+        let t = Target { decl: Some(("helper".into(), None)), then: Some("go(".into()) };
+        assert_eq!(locate(java, &t), Some(9));
+        assert_eq!(classes_around(java, 3), vec!["A".to_string()]);
     }
 
     #[test]
