@@ -224,11 +224,13 @@ struct Doc {
     find_on_load: Option<Target>,
     /// line and column (0-based) the context menu was opened on
     menu_at: Option<(usize, usize)>,
+    /// line actions opened from the keyboard (Shift+F10), shown in a window
+    kb_menu: bool,
 }
 
 impl Doc {
     fn new(open: Open) -> Doc {
-        Doc { open, view: View::Java, text: None, links: None, mark: None, scroll_pending: false, job: None, sel: None, find: String::new(), editing: None, find_on_load: None, menu_at: None }
+        Doc { open, view: View::Java, text: None, links: None, mark: None, scroll_pending: false, job: None, sel: None, find: String::new(), editing: None, find_on_load: None, menu_at: None, kb_menu: false }
     }
 }
 
@@ -601,6 +603,8 @@ enum Msg {
     /// (query, matching strings)
     Strings(String, Vec<(String, usize)>),
     Saved(Result<String, String>),
+    /// a background job panicked: (what it was doing, why)
+    Failed(&'static str, String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -694,9 +698,27 @@ pub struct App {
     logo: Option<egui::TextureHandle>,
 }
 
-fn spawn(f: impl FnOnce() + Send + 'static) {
+/// One-line text box whose hint is also its name for screen readers.
+fn edit(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egui::Response {
+    let r = ui.add(egui::TextEdit::singleline(buf).hint_text(hint).desired_width(width));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, hint));
+    r
+}
+
+/// Run `f` in the background. If it panics, the UI hears about it instead of waiting forever.
+fn spawn(tx: &mpsc::Sender<Msg>, what: &'static str, f: impl FnOnce() + Send + 'static) {
+    let mine = tx.clone();
     // decompiling recurses per nesting level
-    let _ = std::thread::Builder::new().stack_size(256 << 20).spawn(f);
+    let ok = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
+        let tx = mine;
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let why = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown error".into());
+            let _ = tx.send(Msg::Failed(what, why));
+        }
+    });
+    if let Err(e) = ok {
+        let _ = tx.send(Msg::Failed(what, e.to_string()));
+    }
 }
 
 impl App {
@@ -781,7 +803,7 @@ impl App {
         }
         self.path = path.clone();
         let (tx, deobf) = (self.tx.clone(), self.set.deobf);
-        spawn(move || {
+        spawn(&self.tx, "load", move || {
             let _ = tx.send(Msg::Loaded(session::load(&path, deobf)));
         });
     }
@@ -811,7 +833,7 @@ impl App {
         d.text = None;
         d.job = None;
         let tx = self.tx.clone();
-        spawn(move || {
+        spawn(&self.tx, "open", move || {
             let text = match &what {
                 Open::Overview => Some(session::overview(st)),
                 Open::Class(c) => st.class_text(c, view == View::Smali),
@@ -834,7 +856,7 @@ impl App {
         self.docs.push(Doc::new(open.clone()));
         self.active = self.docs.len() - 1;
         let tx = self.tx.clone();
-        spawn(move || {
+        spawn(&self.tx, "report", move || {
             let _ = tx.send(Msg::Report(open, f(st)));
         });
     }
@@ -988,7 +1010,7 @@ impl App {
             let r = if dlg.comment {
                 ui.add(egui::TextEdit::multiline(&mut dlg.text).desired_rows(4).desired_width(420.0))
             } else {
-                ui.add(egui::TextEdit::singleline(&mut dlg.text).hint_text("new name").desired_width(320.0))
+                edit(ui, &mut dlg.text, "new name", 320.0)
             };
             ui.label(RichText::new("Saved next to the APK in <apk>.apkscope.json. `apkscope map` exports it for JADX / Enigma.").small());
             ui.horizontal(|ui| {
@@ -1031,9 +1053,7 @@ impl App {
                 return;
             }
         };
-        if let Some(p) = &self.prog {
-            p.cancel.store(true, Ordering::Relaxed);
-        }
+        self.cancel_search();
         self.search_id += 1;
         self.search_err = None;
         self.folded.clear();
@@ -1047,9 +1067,20 @@ impl App {
         let prog = Arc::new(Progress::default());
         self.prog = Some(prog.clone());
         let (tx, id) = (self.tx.clone(), self.search_id);
-        spawn(move || {
+        spawn(&self.tx, "search", move || {
             let _ = tx.send(Msg::Hits(id, session::search(st, &m, &prog)));
         });
+    }
+
+    /// Stop the running search and give the UI back now; a class stuck decompiling finishes
+    /// on its own and its late result is dropped (stale search id).
+    fn cancel_search(&mut self) {
+        if let Some(p) = self.prog.take() {
+            p.cancel.store(true, Ordering::Relaxed);
+            self.search_id += 1;
+            self.hits_secs = self.search_started.map_or(0.0, |t| t.elapsed().as_secs_f32());
+            self.hits_title += " (cancelled)";
+        }
     }
 
     /// Usages of an exact name or string, as from the Strings tab.
@@ -1075,7 +1106,7 @@ impl App {
                     self.strings_for = None;
                     self.strings.clear();
                     self.st = Some(st);
-                    spawn(move || st.build_index());
+                    spawn(&self.tx, "index", move || st.build_index());
                     self.open(Open::Overview, None, None);
                 }
                 Msg::Loaded(Err(e)) => {
@@ -1113,6 +1144,28 @@ impl App {
                 Msg::Strings(..) => {}
                 Msg::Saved(Ok(s)) => self.toast(s),
                 Msg::Saved(Err(e)) => self.toast(format!("Export failed: {e}")),
+                Msg::Failed(what, why) => {
+                    let msg = format!("Something went wrong ({what}): {why}");
+                    match what {
+                        "load" => {
+                            self.err = Some(msg.clone());
+                            self.path.clear();
+                        }
+                        "search" => {
+                            self.prog = None;
+                            self.search_err = Some(msg.clone());
+                        }
+                        // tabs still waiting for text would spin forever
+                        "open" | "report" => {
+                            for d in self.docs.iter_mut().filter(|d| d.text.is_none()) {
+                                d.text = Some(Arc::new(format!("// {msg}\n")));
+                                d.job = None;
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.toast(msg);
+                }
             }
         }
     }
@@ -1175,7 +1228,7 @@ impl App {
                 if ui.button("Extract all…").on_hover_text("Write every file of the APK to a folder").clicked() {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         let tx = self.tx.clone();
-                        spawn(move || {
+                        spawn(&self.tx, "save", move || {
                             let r = st.extract_all(&dir).map(|n| format!("Extracted {n} files to {}", dir.display()));
                             let _ = tx.send(Msg::Saved(r));
                         });
@@ -1204,7 +1257,7 @@ impl App {
             });
             if verify {
                 let (tx, file) = (self.tx.clone(), st.file.clone());
-                spawn(move || {
+                spawn(&self.tx, "save", move || {
                     let r = apksign::verify(&file).map(|l| l.join(", "));
                     let _ = tx.send(Msg::Saved(r.map(|l| format!("Signature: {l}"))));
                 });
@@ -1230,7 +1283,7 @@ impl App {
                     self.edits.remove(&n);
                 }
             }
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter files…").desired_width(f32::INFINITY));
+            edit(ui, &mut self.filter, "Filter files…", f32::INFINITY);
             ui.separator();
             let filter = self.filter.to_lowercase();
             let mut go = None;
@@ -1297,14 +1350,14 @@ impl App {
             return;
         }
         if self.side == Side::Strings {
-            ui.add(egui::TextEdit::singleline(&mut self.strings_q).hint_text("Filter strings…").desired_width(f32::INFINITY));
+            edit(ui, &mut self.strings_q, "Filter strings…", f32::INFINITY);
             // list everything at first, then refilter as the user types (stale replies are dropped)
             // the index adds usage counts: list again once it's ready
             let key = format!("{} {}", self.strings_q, st.index.get().is_some());
             if self.strings_for.as_deref() != Some(key.as_str()) {
                 self.strings_for = Some(key.clone());
                 let (tx, q) = (self.tx.clone(), self.strings_q.clone());
-                spawn(move || {
+                spawn(&self.tx, "strings", move || {
                     let v = st.strings(&q, session::LIMIT);
                     let _ = tx.send(Msg::Strings(key, v));
                 });
@@ -1330,7 +1383,7 @@ impl App {
             return;
         }
         let hint = if self.side == Side::Classes { "Filter classes…" } else { "Filter resources…" };
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(hint).desired_width(f32::INFINITY));
+        edit(ui, &mut self.filter, hint, f32::INFINITY);
         if self.side == Side::Resources && ui.button("Edit strings…").on_hover_text("Change string resources (app name, texts, URLs in strings.xml)").clicked() {
             let base = match self.edits.get("resources.arsc") {
                 Some(Some(b)) => Some(b.clone()),
@@ -1406,6 +1459,7 @@ impl App {
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         let p = self.set.theme.palette();
         let mut go = None;
+        let mut cancel = false;
         ui.horizontal(|ui| match (&self.prog, self.st) {
             (Some(pr), Some(_)) => {
                 ui.spinner();
@@ -1414,9 +1468,7 @@ impl App {
                 if total > 0 {
                     ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_width(180.0).text(format!("{done} / {total} classes")));
                 }
-                if ui.button("Cancel").clicked() {
-                    pr.cancel.store(true, Ordering::Relaxed);
-                }
+                cancel = ui.button("Cancel").on_hover_text("Esc").clicked();
             }
             _ => {
                 let more = if self.hits.len() >= session::LIMIT { format!(" (first {})", session::LIMIT) } else { String::new() };
@@ -1436,6 +1488,9 @@ impl App {
                 }
             }
         });
+        if cancel {
+            self.cancel_search();
+        }
         ui.label(RichText::new(self.scope.note()).small().italics().color(p.dim));
         ui.separator();
         let size = self.set.code_font - 0.5;
@@ -1451,7 +1506,7 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.hits_filter).hint_text("Filter results…").desired_width(220.0));
+            edit(ui, &mut self.hits_filter, "Filter results…", 220.0);
             ui.label(RichText::new(format!("{} classes", groups.len())).color(p.dim));
             if ui.small_button("Fold all").clicked() {
                 self.folded = groups.iter().map(|g| g.0.to_string()).collect();
@@ -1566,7 +1621,7 @@ impl App {
                             ui.selectable_value(&mut dlg.config, c.to_string(), if c.is_empty() { "default" } else { c });
                         }
                     });
-                    ui.add(egui::TextEdit::singleline(&mut dlg.filter).hint_text("Filter by name or text…").desired_width(260.0));
+                    edit(ui, &mut dlg.filter, "Filter by name or text…", 260.0);
                     ui.label(RichText::new(format!("{} changed", dlg.changes.len())).color(p.dim));
                 });
                 ui.separator();
@@ -1665,7 +1720,7 @@ impl App {
             if let Some(out) = rfd::FileDialog::new().set_file_name(format!("{stem}-apkscope.apk")).add_filter("APK", &["apk"]).save_file() {
                 let own = dlg.own_key.then(|| (dlg.key.clone(), dlg.cert.clone()));
                 let (tx, edits, file) = (self.tx.clone(), self.edits.clone(), st.file.clone());
-                spawn(move || {
+                spawn(&self.tx, "save", move || {
                     let r = (|| {
                         let key = match own {
                             Some((k, c)) => apksign::load(std::path::Path::new(&k), std::path::Path::new(&c))?,
@@ -1716,7 +1771,7 @@ impl App {
             };
             if let Some(file) = rfd::FileDialog::new().set_file_name(format!("apkscope-results.{ext}")).add_filter(ext, &[ext]).save_file() {
                 let (tx, hits, st) = (self.tx.clone(), self.hits.clone(), self.st);
-                spawn(move || {
+                spawn(&self.tx, "save", move || {
                     let Some(st) = st else { return };
                     let out = session::export(&hits, ctxl, method, fmt, |t| st.target_text(t));
                     let r = std::fs::write(&file, out).map(|_| format!("Saved {} hits to {}", hits.len(), file.display())).map_err(|e| e.to_string());
@@ -2006,19 +2061,28 @@ impl eframe::App for App {
         } else if fwd {
             self.nav(true);
         }
-        // Escape clears the marked word
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Escape cancels a running search, else clears the marked word
+        if self.prog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_search();
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if let Some(d) = self.docs.get_mut(self.active) {
                 if d.sel.take().is_some() {
                     d.job = None;
                 }
             }
         }
+        // Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Ctrl+O opens an APK
+        let (next_tab, prev_tab, open_apk) = ctx.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Tab), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Tab), i.modifiers.command && i.key_pressed(egui::Key::O)));
+        if !self.docs.is_empty() && (next_tab || prev_tab) {
+            let n = self.docs.len();
+            self.active = if next_tab { (self.active + 1) % n } else { (self.active + n - 1) % n };
+        }
         egui::TopBottomPanel::top("bar").frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(10, 8))).show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // wraps instead of pushing Search and Settings off a narrow window
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("apkscope").strong().size(16.0).color(p.accent));
                 ui.add_space(6.0);
-                if ui.button("Open APK…").clicked() {
+                if ui.button("Open APK…").on_hover_text("Ctrl+O").clicked() || open_apk {
                     if let Some(f) = rfd::FileDialog::new().add_filter("APK, split bundle or DEX", &session::INPUTS).pick_file() {
                         self.start_load(f.display().to_string());
                     }
@@ -2043,18 +2107,32 @@ impl eframe::App for App {
                     self.report("Decrypted strings".into(), |st| crate::re::decrypt_report(&st.dexes));
                 }
                 ui.separator();
-                egui::ComboBox::from_id_salt("scope").width(160.0).selected_text(self.scope.label()).show_ui(ui, |ui| {
+                let scope = self.scope.label();
+                egui::ComboBox::from_id_salt("scope").width(160.0).selected_text(scope).show_ui(ui, |ui| {
                     for s in Scope::ALL {
                         ui.selectable_value(&mut self.scope, s, s.label()).on_hover_text(s.note());
                     }
-                });
+                })
+                .response
+                .on_hover_text("Search scope (Up / Down in the search box)")
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, format!("Search scope: {scope}")));
                 let hint = if self.scope.query_optional() { "optional filter (Enter lists all)" } else { "Search…  (Ctrl+F)" };
-                let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text(hint).desired_width(280.0));
+                let r = edit(ui, &mut self.query, hint, 280.0);
                 if std::mem::take(&mut self.focus_search) {
                     r.request_focus();
                 }
-                ui.toggle_value(&mut self.case, "Aa").on_hover_text("Match case");
-                ui.toggle_value(&mut self.use_regex, ".*").on_hover_text("Regular expression");
+                // Up / Down in the search box change the scope
+                if r.has_focus() {
+                    let (up, down) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown)));
+                    if up || down {
+                        let k = Scope::ALL.iter().position(|&s| s == self.scope).unwrap_or(0);
+                        let n = Scope::ALL.len();
+                        self.scope = Scope::ALL[if down { (k + 1) % n } else { (k + n - 1) % n }];
+                    }
+                }
+                let (case, re) = (self.case, self.use_regex);
+                ui.toggle_value(&mut self.case, "Aa").on_hover_text("Match case").widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, case, "Match case"));
+                ui.toggle_value(&mut self.use_regex, ".*").on_hover_text("Regular expression").widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, re, "Regular expression"));
                 ui.toggle_value(&mut self.app_only, "App only").on_hover_text("Skip classes from known libraries and SDKs (faster, less noise)");
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let go = ui.add_enabled(self.st.is_some(), egui::Button::new(RichText::new("Search").strong()).fill(p.accent.gamma_multiply(0.55)));
@@ -2064,11 +2142,9 @@ impl eframe::App for App {
                 if let Some(e) = &self.search_err {
                     ui.colored_label(Color32::from_rgb(230, 80, 80), e.lines().last().unwrap_or(e));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Settings").clicked() {
-                        self.show_settings = !self.show_settings;
-                    }
-                });
+                if ui.button("Settings").clicked() {
+                    self.show_settings = !self.show_settings;
+                }
             });
             if self.scope.query_optional() {
                 ui.label(RichText::new(self.scope.note()).small().italics().color(p.dim));
@@ -2278,7 +2354,7 @@ impl eframe::App for App {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(t.to_string());
                         }
-                        let r = ui.add(egui::TextEdit::singleline(&mut doc.find).hint_text("Find in file (Enter)").desired_width(200.0));
+                        let r = edit(ui, &mut doc.find, "Find in file (Enter)", 200.0);
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !doc.find.is_empty() {
                             if let Some(l) = find_next(t, &doc.find, doc.mark.unwrap_or(0)) {
                                 doc.mark = Some(l);
@@ -2344,6 +2420,43 @@ impl eframe::App for App {
                     }
                 });
             });
+            // keyboard, with no text box focused: Up/Down move the marked line, F12 goes to
+            // the definition (or follows a report link), Shift+F10 opens the line's actions
+            if ui.ctx().memory(|m| m.focused().is_none()) && !doc.kb_menu {
+                let (up, down, f12, menu) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::F12), i.modifiers.shift && i.key_pressed(egui::Key::F10)));
+                if up || down {
+                    let (cur, n) = (doc.mark.unwrap_or(0), text.lines().count().max(1));
+                    doc.mark = Some(if up { cur.saturating_sub(1).max(1) } else { (cur + 1).min(n) });
+                    doc.scroll_pending = true;
+                    doc.job = None;
+                }
+                if let Some(l) = doc.mark.map(|m| m - 1).filter(|_| f12 || menu) {
+                    let line = text.lines().nth(l).unwrap_or("");
+                    // the name before the first `(`, else the first word
+                    let col = line.find('(').and_then(|p| p.checked_sub(1)).unwrap_or(line.len() - line.trim_start().len());
+                    if f12 && is_report {
+                        act = doc.links.as_ref().and_then(|v| v.get(l).cloned().flatten()).map(Act::GoTo);
+                    } else if let (true, Open::Class(top), Some(st)) = (f12, &doc.open, st_now) {
+                        act = definition(st, top, &text, l, col);
+                    }
+                    if menu {
+                        doc.menu_at = Some((l, col));
+                        doc.kb_menu = true;
+                    }
+                }
+            }
+            if doc.kb_menu {
+                let mut open = true;
+                egui::Window::new("Line actions").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+                    if let Some(a) = line_menu(ui, doc, &text, st_now) {
+                        act = Some(a);
+                        doc.kb_menu = false;
+                    }
+                });
+                if !open || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    doc.kb_menu = false;
+                }
+            }
             }
             let Some(_) = doc.text.clone() else {
                 ui.spinner();
