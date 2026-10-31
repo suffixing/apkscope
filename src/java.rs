@@ -859,6 +859,8 @@ struct Emitter<'a> {
     trys: Vec<Vec<(Option<u32>, usize)>>,
     /// first block reached that is outside the innermost try
     try_exit: Option<usize>,
+    /// small regions being repeated inside each other; flattened control flow would repeat forever
+    dups: usize,
     /// leading statements to skip per block (catch parameter, code hoisted into `finally`)
     skip: HashMap<usize, usize>,
 }
@@ -901,7 +903,7 @@ impl<'a> Emitter<'a> {
         Emitter {
             merge: merge_points(cfg, &header),
             ctx, insns, cfg, bir, visited: vec![false; n], header, follow, loops: vec![],
-            lines: vec![], starts: HashMap::new(), labels: BTreeSet::new(), trys: vec![], try_exit: None, skip: HashMap::new(),
+            lines: vec![], starts: HashMap::new(), labels: BTreeSet::new(), trys: vec![], try_exit: None, dups: 0, skip: HashMap::new(),
         }
     }
 
@@ -1191,10 +1193,12 @@ impl<'a> Emitter<'a> {
                 return;
             }
             // a short region that only continues where this construct ends: `if (A) { if (B) X else Y } else Y`
-            if self.visited[b] && ind <= MAX_DEPTH {
+            if self.visited[b] && ind <= MAX_DEPTH && self.dups < 4 {
                 if let Some(region) = self.small_region(b, stop) {
                     let saved: Vec<bool> = region.iter().map(|&r| std::mem::replace(&mut self.visited[r], false)).collect();
+                    self.dups += 1;
                     self.seq(b, stop, ind);
+                    self.dups -= 1;
                     for (&r, v) in region.iter().zip(saved) {
                         self.visited[r] |= v;
                     }
