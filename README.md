@@ -26,6 +26,30 @@
 
 Every number comes from a script in [`bench/`](bench). [See all results →](BENCHMARKS.md)
 
+**Who it's for:** reverse engineers, mobile pentesters, and people who hand APKs to AI agents.
+
+## See it in action
+
+Real output on AntennaPod from F-Droid: find the custom TLS trust manager, then every place that
+checks server certificates, with the Java line.
+
+```text
+$ apkscope refs antennapod.apk impl javax.net.ssl.X509TrustManager
+classes.dex | Lde/danoeh/antennapod/net/ssl/CompositeX509TrustManager; | matched=Ljavax/net/ssl/X509TrustManager;
+1 refs in 36 ms
+
+$ apkscope refs antennapod.apk method checkServerTrusted --java --limit 3
+classes3.dex | Lokhttp3/internal/platform/android/AndroidCertificateChainCleaner;->clean(...) | matched=...checkServerTrusted(...)
+       63: list2 = this.x509TrustManagerExtensions.checkServerTrusted(x509CertificateArr, "RSA", str);
+classes3.dex | Lorg/conscrypt/ConscryptEngine;->verifyCertificateChain([[BLjava/lang/String;)V | matched=...checkServerTrusted(...)
+     1718: Platform.checkServerTrusted(x509TrustManager, x509CertificateArr, str, this);
+classes3.dex | Lorg/conscrypt/ConscryptEngineSocket$2$$ExternalSyntheticApiModelOutline1;->m(...) | matched=...checkServerTrusted(...)
+       10: x509ExtendedTrustManager.checkServerTrusted(x509CertificateArr, str, socket);
+3 refs in 54 ms
+```
+
+Long descriptors shortened with `...`; everything else is as printed.
+
 ---
 
 ## One question, one call
