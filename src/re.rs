@@ -374,38 +374,46 @@ fn frida_type(t: &str) -> String {
 }
 
 /// A ready-to-run Frida script hooking every overload of `name` in `class` (all methods for None):
-/// logs arguments, return value and exceptions, then calls the original.
-pub fn frida(dexes: &[Dex], class: &str, name: Option<&str>) -> Result<String, String> {
+/// logs arguments, return value and exceptions, then calls the original. `live` emits JSON
+/// events for [`crate::live`] instead of console text, and skips the `Java.perform` wrapper.
+pub fn frida(dexes: &[Dex], class: &str, name: Option<&str>, live: bool) -> Result<String, String> {
     let d = desc(class);
     let (dx, c) = dexes.iter().find_map(|dx| dx.find_class(&d).map(|c| (dx, c))).ok_or_else(|| format!("class {class} not found"))?;
     let java = d.trim_start_matches('L').trim_end_matches(';').replace('/', ".");
-    let mut o = format!("// frida -U -f <package> -l hook.js\nJava.perform(() => {{\n    const C = Java.use(\"{java}\");\n");
+    let head = if live { "{\n" } else { "// frida -U -f <package> -l hook.js\nJava.perform(() => {\n" };
+    let mut o = format!("{head}    const C = Java.use(\"{java}\");\n");
     let mut n = 0;
     for m in dx.class_data(c)?.methods {
         let (_, mname, proto) = dx.method_parts(m.method_idx)?;
         if mname == "<clinit>" || name.is_some_and(|w| w != mname && !(w == "<init>" && mname == "<init>")) || m.access & 0x1000 != 0 && name.is_none() {
             continue;
         }
-        let (ret, params) = dx.proto_parts(proto)?;
+        let (ret_ty, params) = dx.proto_parts(proto)?;
         let js = if mname == "<init>" { "$init".to_string() } else { mname.clone() };
         let args: Vec<String> = (0..params.len()).map(|k| format!("a{k}")).collect();
         let types: Vec<String> = params.iter().map(|p| format!("\"{}\"", frida_type(p))).collect();
         let a = args.join(", ");
         let shown = args.iter().map(|x| format!("${{{x}}}")).collect::<Vec<_>>().join(", ");
+        let m = format!("{java}.{mname}");
+        let (call, ret, throw) = if live {
+            (format!("__ev(\"call\", \"{m}\", [{a}].map(__s));"), format!("__ev(\"ret\", \"{m}\", __s(r));"), format!("__ev(\"throw\", \"{m}\", __s(e));"))
+        } else {
+            (format!("console.log(`[call] {m}({shown})`);"), format!("console.log(`[ret]  {m} -> ${{r}}`);"), format!("console.log(`[throw] {m}: ${{e}}`);"))
+        };
         let _ = write!(
             o,
-            "    C[\"{js}\"].overload({}).implementation = function ({a}) {{\n        console.log(`[call] {java}.{mname}({shown})`);\n        try {{\n            const r = this[\"{js}\"].overload({}).call(this{}{a});\n{}            return r;\n        }} catch (e) {{\n            console.log(`[throw] {java}.{mname}: ${{e}}`);\n            throw e;\n        }}\n    }};\n",
+            "    C[\"{js}\"].overload({}).implementation = function ({a}) {{\n        {call}\n        try {{\n            const r = this[\"{js}\"].overload({}).call(this{}{a});\n{}            return r;\n        }} catch (e) {{\n            {throw}\n            throw e;\n        }}\n    }};\n",
             types.join(", "),
             types.join(", "),
             if args.is_empty() { "" } else { ", " },
-            if ret == "V" { String::new() } else { format!("            console.log(`[ret]  {java}.{mname} -> ${{r}}`);\n") },
+            if ret_ty == "V" && !live { String::new() } else { format!("            {ret}\n") },
         );
         n += 1;
     }
     if n == 0 {
         return Err(format!("no method {} in {class}", name.unwrap_or("")));
     }
-    o += "});\n";
+    o += if live { "}\n" } else { "});\n" };
     Ok(o)
 }
 

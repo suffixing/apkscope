@@ -8,6 +8,8 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, RichText, Stroke, TextFormat, text::LayoutJob};
 
 use crate::{apksign, arsc, cache, rebuild};
+
+mod live_ui;
 use crate::re::{Line, Link};
 use crate::session::{self, Format, Hit, Matcher, Origin, Progress, Scope, State};
 
@@ -256,6 +258,8 @@ enum Act {
     Callers(String, Option<String>),
     Graph(String, Option<String>),
     Frida(String, Option<String>),
+    /// hook in the running Frida session
+    LiveHook(String, Option<String>),
     Access(String, String),
     Smali(String, String),
     Note(String, bool, String),
@@ -535,6 +539,7 @@ fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Op
                 if let Some((o, n)) = real {
                     pick(ui, "Callers", Act::Callers(o.clone(), Some(n.clone())));
                     pick(ui, "Call graph", Act::Graph(o.clone(), Some(n.clone())));
+                    pick(ui, "Hook live (Frida)", Act::LiveHook(o.clone(), Some(n.clone())));
                     pick(ui, "Frida hook (copy)", Act::Frida(o, Some(n)));
                 }
                 pick(ui, "Find usages", Act::Usages(word.clone()));
@@ -566,6 +571,7 @@ fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Op
             pick(ui, "Callers", Act::Callers(owner.clone(), Some(name.clone())));
             pick(ui, "Call graph", Act::Graph(owner.clone(), Some(name.clone())));
             pick(ui, if line.contains("WARNING") { "Show this method in Smali" } else { "Show Smali" }, Act::Smali(top.clone(), name.clone()));
+            pick(ui, "Hook live (Frida)", Act::LiveHook(owner.clone(), Some(name.clone())));
             pick(ui, "Frida hook (copy)", Act::Frida(owner.clone(), Some(name.clone())));
             ui.separator();
             pick(ui, "Rename…", Act::Note(format!("{owner}->{name}()"), false, format!("Rename method {shown}")));
@@ -586,6 +592,7 @@ fn line_menu(ui: &mut egui::Ui, doc: &Doc, text: &str, st: Option<&State>) -> Op
             ui.label(RichText::new(format!("class {shown}")).strong());
             pick(ui, &format!("Where {shown} is created"), Act::Callers(owner.clone(), Some("<init>".into())));
             pick(ui, "Callers (any method)", Act::Callers(owner.clone(), None));
+            pick(ui, "Hook all methods live (Frida)", Act::LiveHook(owner.clone(), None));
             pick(ui, "Frida hooks (all methods, copy)", Act::Frida(owner.clone(), None));
             ui.separator();
             pick(ui, "Rename…", Act::Note(owner.clone(), false, format!("Rename class {shown} (a short name keeps the package)")));
@@ -696,6 +703,7 @@ pub struct App {
     hits_filter: String,
     titled: bool,
     logo: Option<egui::TextureHandle>,
+    live: live_ui::LiveUi,
 }
 
 /// One-line text box whose hint is also its name for screen readers.
@@ -777,6 +785,7 @@ impl App {
             hits_filter: String::new(),
             titled: false,
             logo: None,
+            live: Default::default(),
         };
         if let Some(p) = path {
             app.start_load(p);
@@ -961,7 +970,7 @@ impl App {
             }
             Act::Graph(c, m) => self.report(format!("Graph {}", short(&c, &m)), move |st| crate::re::graph_report(&st.dexes, &c, m.as_deref(), 3)),
             Act::Access(c, f) => self.report(format!("Access {}", short(&c, &Some(f.clone()))), move |st| crate::re::access_report(&st.dexes, &c, &f)),
-            Act::Frida(c, m) => match crate::re::frida(&st.dexes, &c, m.as_deref()) {
+            Act::Frida(c, m) => match crate::re::frida(&st.dexes, &c, m.as_deref(), false) {
                 Ok(js) => {
                     ctx.copy_text(js.clone());
                     self.report(format!("Frida {}", short(&c, &m)), move |_| js.lines().map(|l| (l.to_string(), None)).collect());
@@ -969,6 +978,10 @@ impl App {
                 }
                 Err(e) => self.toast(e),
             },
+            Act::LiveHook(c, m) => {
+                let r = self.live.hook(st, &c, m.as_deref());
+                self.toast(r.unwrap_or_else(|e| e));
+            }
             Act::Smali(class_name, method) => {
                 self.push_nav();
                 self.open(Open::Class(class_name), Some(View::Smali), None);
@@ -2078,37 +2091,44 @@ impl eframe::App for App {
             self.active = if next_tab { (self.active + 1) % n } else { (self.active + n - 1) % n };
         }
         egui::TopBottomPanel::top("bar").frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(10, 8))).show(ctx, |ui| {
-            // wraps instead of pushing Search and Settings off a narrow window
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 ui.label(RichText::new("apkscope").strong().size(16.0).color(p.accent));
                 ui.add_space(6.0);
-                if ui.button("Open APK…").on_hover_text("Ctrl+O").clicked() || open_apk {
+                if ui.button("Open…").on_hover_text("Open an APK, split bundle or DEX (Ctrl+O)").clicked() || open_apk {
                     if let Some(f) = rfd::FileDialog::new().add_filter("APK, split bundle or DEX", &session::INPUTS).pick_file() {
                         self.start_load(f.display().to_string());
                     }
                 }
-                if ui.add_enabled(self.st.is_some(), egui::Button::new("Export project…")).on_hover_text("Write a Gradle project (runs in the background)").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        if let Ok(exe) = std::env::current_exe() {
-                            let mut cmd = std::process::Command::new(exe);
-                            cmd.arg("export").arg(&self.path).arg(&dir);
-                            if !self.set.deobf {
-                                cmd.arg("--no-deobf");
+                // one-off jobs live in a menu so the bar stays readable
+                ui.add_enabled_ui(self.st.is_some(), |ui| {
+                    ui.menu_button("Tools", |ui| {
+                        if ui.button("Export Gradle project…").on_hover_text("Write a Gradle project (runs in the background)").clicked() {
+                            ui.close_menu();
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                if let Ok(exe) = std::env::current_exe() {
+                                    let mut cmd = std::process::Command::new(exe);
+                                    cmd.arg("export").arg(&self.path).arg(&dir);
+                                    if !self.set.deobf {
+                                        cmd.arg("--no-deobf");
+                                    }
+                                    let _ = cmd.spawn();
+                                    self.toast(format!("Exporting to {} in the background", dir.display()));
+                                }
                             }
-                            let _ = cmd.spawn();
-                            self.toast(format!("Exporting to {} in the background", dir.display()));
                         }
-                    }
-                }
-                if ui.add_enabled(self.st.is_some(), egui::Button::new("Security scan")).on_hover_text("Manifest flags, exported components, risky APIs, weak crypto, TLS overrides, keys and URLs").clicked() {
-                    self.report("Security scan".into(), |st| crate::re::scan(st).lines().map(|l| (l.to_string(), None)).collect());
-                }
-                if ui.add_enabled(self.st.is_some(), egui::Button::new("Decrypt strings")).on_hover_text("Run string-decryptor methods on their constant arguments (also shown inline in the code as /* = \"...\" */)").clicked() {
-                    self.report("Decrypted strings".into(), |st| crate::re::decrypt_report(&st.dexes));
-                }
+                        if ui.button("Security scan").on_hover_text("Manifest flags, exported components, risky APIs, weak crypto, TLS overrides, keys and URLs").clicked() {
+                            self.report("Security scan".into(), |st| crate::re::scan(st).lines().map(|l| (l.to_string(), None)).collect());
+                            ui.close_menu();
+                        }
+                        if ui.button("Decrypt strings").on_hover_text("Run string-decryptor methods on their constant arguments (also shown inline in the code as /* = \"...\" */)").clicked() {
+                            self.report("Decrypted strings".into(), |st| crate::re::decrypt_report(&st.dexes));
+                            ui.close_menu();
+                        }
+                    });
+                });
                 ui.separator();
                 let scope = self.scope.label();
-                egui::ComboBox::from_id_salt("scope").width(160.0).selected_text(scope).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("scope").width(130.0).selected_text(scope).show_ui(ui, |ui| {
                     for s in Scope::ALL {
                         ui.selectable_value(&mut self.scope, s, s.label()).on_hover_text(s.note());
                     }
@@ -2117,7 +2137,7 @@ impl eframe::App for App {
                 .on_hover_text("Search scope (Up / Down in the search box)")
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, format!("Search scope: {scope}")));
                 let hint = if self.scope.query_optional() { "optional filter (Enter lists all)" } else { "Search…  (Ctrl+F)" };
-                let r = edit(ui, &mut self.query, hint, 280.0);
+                let r = edit(ui, &mut self.query, hint, (ui.available_width() - 470.0).clamp(140.0, 520.0));
                 if std::mem::take(&mut self.focus_search) {
                     r.request_focus();
                 }
@@ -2139,13 +2159,22 @@ impl eframe::App for App {
                 if go.clicked() || enter {
                     self.run_search();
                 }
-                if let Some(e) = &self.search_err {
-                    ui.colored_label(Color32::from_rgb(230, 80, 80), e.lines().last().unwrap_or(e));
-                }
-                if ui.button("Settings").clicked() {
-                    self.show_settings = !self.show_settings;
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙").on_hover_text("Settings").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                    // Frida costs nothing until this is on
+                    let on = self.live.open;
+                    let label = RichText::new(if self.live.running() { "● Live  on" } else { "○ Live" }).strong().color(if on { Color32::BLACK } else { p.dim });
+                    let b = egui::Button::new(label).fill(if on { Color32::from_rgb(60, 255, 120) } else { p.panel }).corner_radius(CornerRadius::same(10));
+                    if ui.add_enabled(self.st.is_some(), b).on_hover_text("Live mode: run the app under Frida, hook methods with a click, see what runs").clicked() {
+                        self.live.open = !on;
+                    }
+                });
             });
+            if let Some(e) = &self.search_err {
+                ui.colored_label(Color32::from_rgb(230, 80, 80), e.lines().last().unwrap_or(e));
+            }
             if self.scope.query_optional() {
                 ui.label(RichText::new(self.scope.note()).small().italics().color(p.dim));
             }
@@ -2186,6 +2215,13 @@ impl eframe::App for App {
         // the sidebar only means something once an APK is open
         if self.st.is_some() {
             egui::SidePanel::left("side").default_width(330.0).resizable(true).frame(egui::Frame::new().fill(p.panel).inner_margin(Margin::same(8))).show(ctx, |ui| self.side_panel(ui));
+        }
+        if let (Some(st), true) = (self.st, self.live.open) {
+            let mut act = None;
+            egui::SidePanel::right("live").resizable(true).default_width(440.0).min_width(320.0).frame(egui::Frame::new().fill(Color32::from_rgb(6, 10, 8)).inner_margin(Margin::same(8))).show(ctx, |ui| act = self.live.show(ui, st));
+            if let Some(a) = act {
+                self.act(a, ctx);
+            }
         }
         if self.prog.is_some() || !self.hits_title.is_empty() {
             egui::TopBottomPanel::bottom("hits").resizable(true).default_height(240.0).frame(egui::Frame::new().fill(p.panel).inner_margin(Margin::same(8))).show(ctx, |ui| self.results_panel(ui));

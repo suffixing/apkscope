@@ -149,6 +149,11 @@ strings that were added or removed. New endpoints and keys stand out right away.
 | `diff_apks` | what changed between two versions |
 | `list_classes` / `list_methods` / `list_strings` | with prefix, filter and app-only |
 | `get_resource` / `export_project` / `verify_signature` | resources, Gradle export, signatures |
+| `frida_start` / `frida_hook` / `frida_events` | live Frida on a device: hook a method by name, read its calls, args, returns and throws |
+| `frida_script` / `frida_unhook` / `frida_stop` | load your own Frida JS, remove hooks without restarting the app |
+
+Live Frida needs `pip install frida-tools` here and frida-server on the device. Hooks are added and
+removed while the app runs; `frida_events` pages with `since`, so an agent polls only what is new.
 
 **It saves the agent's context.** Every reply pages with `limit` / `offset`, is capped at 60k
 characters by default, and `app_only` hides androidx, Play services and ad SDKs.

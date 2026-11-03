@@ -11,6 +11,8 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::live::Live;
+
 const PROTOCOL: &str = "2025-06-18";
 /// default cap on a tool's text, so one call can't flood an agent's context
 const MAX_CHARS: usize = 60_000;
@@ -77,7 +79,19 @@ fn tools() -> Value {
         {"name": "verify_signature", "description": "Check the APK's v1 / v2 / v3 signatures and print the signer certificate.",
          "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk}}},
         {"name": "diff_apks", "description": "What changed between two versions of an app: added / removed classes, methods of classes both have, permissions, and optionally strings (new URLs, keys). Lines start with + or -.",
-         "inputSchema": {"type": "object", "required": ["apk_path", "new_apk_path"], "properties": {"apk_path": apk, "new_apk_path": {"type": "string", "description": "the newer APK"}, "strings": {"type": "boolean", "description": "also diff string-pool values"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}}
+         "inputSchema": {"type": "object", "required": ["apk_path", "new_apk_path"], "properties": {"apk_path": apk, "new_apk_path": {"type": "string", "description": "the newer APK"}, "strings": {"type": "boolean", "description": "also diff string-pool values"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}},
+        {"name": "frida_start", "description": "Start a live Frida session on a device (needs frida-tools on this machine and frida-server on the device). Spawns the app (or attaches to it), then hooks are added with frida_hook and their calls read with frida_events. One session at a time; starting again replaces it.",
+         "inputSchema": {"type": "object", "properties": {"apk_path": {"type": "string", "description": "APK to take the package name from"}, "package": {"type": "string", "description": "app id, instead of apk_path"}, "attach": {"type": "boolean", "description": "attach to the running app instead of spawning it"}, "device": {"type": "string", "description": "frida device id (default: USB)"}}}},
+        {"name": "frida_hook", "description": "Hook every overload of a method (or all methods of a class) in the live session: each call logs its arguments, return value or exception. Takes effect at once, no restart.",
+         "inputSchema": {"type": "object", "required": ["apk_path", "class"], "properties": {"apk_path": apk, "class": {"type": "string", "description": "Java class name or descriptor"}, "method": {"type": "string", "description": "method name (omit for all methods, <init> for constructors)"}}}},
+        {"name": "frida_script", "description": "Load your own Frida JavaScript into the live session under a name (same name replaces it). Wrap Java code in Java.perform; call __ev(kind, name, value) to report events that frida_events shows; console.log lines show as kind log.",
+         "inputSchema": {"type": "object", "required": ["name", "js"], "properties": {"name": {"type": "string"}, "js": {"type": "string"}}}},
+        {"name": "frida_unhook", "description": "Remove a hook or script: a class (all its methods), Class#method, a script name, or * for everything.",
+         "inputSchema": {"type": "object", "required": ["key"], "properties": {"key": {"type": "string"}}}},
+        {"name": "frida_events", "description": "What the hooks saw: one line per event (#seq thread kind method value), kinds call / ret / throw / error / log. Pass the returned next_since back to get only newer events; summary: true counts calls per method instead.",
+         "inputSchema": {"type": "object", "properties": {"since": {"type": "integer"}, "filter": {"type": "string", "description": "substring of method or value"}, "limit": {"type": "integer", "description": "newest events to return (default 200)"}, "summary": {"type": "boolean"}}}},
+        {"name": "frida_stop", "description": "End the live session (kills frida; a spawned app keeps running).",
+         "inputSchema": {"type": "object", "properties": {}}}
     ])
 }
 
@@ -310,6 +324,61 @@ fn call(workers: &mut HashMap<String, Worker>, name: &str, a: &Value) -> Result<
     }
 }
 
+/// The frida_* tools, on the one live session.
+fn live_call(live: &mut Option<Live>, name: &str, a: &Value) -> Result<(String, bool), String> {
+    if name == "frida_start" {
+        *live = None;
+        let target = match (s(a, "package"), s(a, "apk_path")) {
+            (Some(p), _) => p,
+            (None, Some(apk)) => Some(crate::quick::package(&apk)).filter(|p| !p.is_empty()).ok_or("no package name in the APK's manifest; pass package")?,
+            _ => return Err("pass apk_path or package".into()),
+        };
+        let l = Live::start(&target, b(a, "attach"), s(a, "device").as_deref())?;
+        let text = format!("live on {target}\n{}", l.text(0, "", 50).0);
+        *live = Some(l);
+        return Ok((text, true));
+    }
+    let l = live.as_mut().ok_or("no live session: call frida_start first")?;
+    if !l.alive() && name != "frida_events" {
+        return Err(format!("frida has exited:\n{}", l.text(0, "", 30).0));
+    }
+    match name {
+        "frida_hook" => {
+            let class = s(a, "class").ok_or("class is required")?;
+            let method = s(a, "method");
+            let mut args = vec!["frida".into(), s(a, "apk_path").ok_or("apk_path is required")?, class.clone()];
+            args.extend(method.clone());
+            args.push("--live".into());
+            let (js, ok) = run_cli(&args)?;
+            if !ok {
+                return Ok((js, false));
+            }
+            let key = method.map_or(class.clone(), |m| format!("{class}#{m}"));
+            l.hook(&key, &js, false)?;
+            Ok((format!("hooked {key} ({} overloads); active: {}", js.matches(".implementation").count(), l.hook_keys().join(", ")), true))
+        }
+        "frida_script" => {
+            let key = s(a, "name").ok_or("name is required")?;
+            l.hook(&key, &s(a, "js").ok_or("js is required")?, true)?;
+            Ok((format!("loaded {key}; active: {}", l.hook_keys().join(", ")), true))
+        }
+        "frida_unhook" => {
+            let n = l.unhook(&s(a, "key").ok_or("key is required")?)?;
+            Ok((format!("removed {n}; active: {}", l.hook_keys().join(", ")), n > 0))
+        }
+        "frida_events" => {
+            let since = n(a, "since").unwrap_or(0);
+            let (body, next) = if b(a, "summary") { (l.summary(since), l.events.lock().unwrap().next) } else { l.text(since, &s(a, "filter").unwrap_or_default(), n(a, "limit").unwrap_or(200) as usize) };
+            Ok((format!("next_since: {next}{}\n{body}", if l.alive() { "" } else { "  (frida has exited)" }), true))
+        }
+        "frida_stop" => {
+            *live = None;
+            Ok(("stopped".into(), true))
+        }
+        _ => Err(format!("unknown tool {name}")),
+    }
+}
+
 /// Cut `text` at `max` characters on a line boundary, saying how to get the rest.
 fn cap(text: String, max: usize) -> String {
     if text.chars().count() <= max {
@@ -322,6 +391,7 @@ fn cap(text: String, max: usize) -> String {
 
 pub fn serve() -> Result<(), String> {
     let mut workers: HashMap<String, Worker> = HashMap::new();
+    let mut live: Option<Live> = None;
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -353,7 +423,8 @@ pub fn serve() -> Result<(), String> {
                 let name = params["name"].as_str().unwrap_or_default();
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 let max = n(&args, "max_chars").map_or(MAX_CHARS, |m| m as usize);
-                let (text, ok) = call(&mut workers, name, &args).unwrap_or_else(|e| (e, false));
+                let res = if name.starts_with("frida_") { live_call(&mut live, name, &args) } else { call(&mut workers, name, &args) };
+                let (text, ok) = res.unwrap_or_else(|e| (e, false));
                 Ok(json!({"content": [{"type": "text", "text": cap(text, max)}], "isError": !ok}))
             }
             _ => Err(json!({"code": -32601, "message": format!("method not found: {method}")})),

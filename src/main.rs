@@ -11,6 +11,7 @@ mod export;
 #[cfg(feature = "gui")]
 mod gui;
 mod imports;
+mod live;
 mod index;
 mod ir;
 mod java;
@@ -52,7 +53,7 @@ Reverse engineering (Class = a.b.C, member = a.b.C#field or a.b.C#method()):
   apkscope callers   <apk> <Class> [method]      who calls it
   apkscope callgraph <apk> <Class> [method] [--depth N]   callers + callee tree
   apkscope access    <apk> <Class> <field>       who reads / writes a field
-  apkscope frida     <apk> <Class> [method]      Frida hook script
+  apkscope frida     <apk> <Class> [method]      Frida hook script (--live: event body for live sessions)
   apkscope scan      <apk>                       security quick-scan
   apkscope decrypt   <apk>                       run string decryptors on their constant arguments
   apkscope rename    <apk> <Class|member> <new>  saved in <apk>.apkscope.json (empty name removes it)
@@ -667,7 +668,11 @@ fn main() -> ExitCode {
                 _ => emit(&re::call_graph(&st.dexes, class, name, depth)),
             }
         }),
-        [cmd, apk, class, rest @ ..] if cmd == "frida" => load(apk, false).and_then(|st| emit(&re::frida(&st.dexes, class, rest.first().map(String::as_str))?)),
+        [cmd, apk, class, rest @ ..] if cmd == "frida" => {
+            let mut rest = rest.to_vec();
+            let live = flag(&mut rest, "--live");
+            load(apk, false).and_then(|st| emit(&re::frida(&st.dexes, class, rest.first().map(String::as_str), live)?))
+        }
         [cmd, apk] if cmd == "scan" => run_big_stack(|| load(apk, deobf).and_then(|st| emit(&re::scan(&st)))),
         [cmd, apk] if cmd == "decrypt" => load(apk, false).and_then(|st| {
             emit_list(&re::decrypt_all(&st.dexes).into_iter().map(|(at, f, p)| format!("{at}  {f}  =>  {}", session::json_str(&p))).collect::<Vec<_>>())
