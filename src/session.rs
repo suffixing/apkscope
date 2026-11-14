@@ -315,7 +315,7 @@ pub fn load(path: &str, deobf: bool) -> Result<State, String> {
         .collect();
     let table = apk
         .read("resources.arsc")
-        .and_then(|d| res::parse_table(&d).ok());
+        .and_then(|d| apkscope_core::table::read(&d).ok());
     let names = table.as_ref().map(res::Names::new);
     let mut texts = BTreeMap::new();
     let mut files = BTreeMap::new();
@@ -469,11 +469,11 @@ impl State {
             .names
             .as_ref()
             .ok_or("this APK has no resources.arsc to resolve @references")?;
-        crate::axml::encode(
+        Ok(crate::axml::encode(
             text,
             self.read_entry("AndroidManifest.xml").as_deref(),
             names,
-        )
+        )?)
     }
 
     pub fn read_entry(&self, name: &str) -> Option<Vec<u8>> {
@@ -1627,7 +1627,7 @@ pub fn smali(dx: &Dex, c: usize) -> String {
                         out,
                         "    {:04x}: {}",
                         i.off,
-                        crate::render(dx, &i).unwrap_or_else(|e| e)
+                        crate::render(dx, &i).unwrap_or_else(|e| e.to_string())
                     );
                 }
             }
