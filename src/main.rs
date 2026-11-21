@@ -7,6 +7,7 @@ mod deobf;
 mod dex;
 mod elf;
 mod export;
+mod fingerprint;
 #[cfg(feature = "gui")]
 mod gui;
 mod il2cpp;

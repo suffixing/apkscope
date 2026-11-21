@@ -271,6 +271,7 @@ Any MCP client works: `{ "mcpServers": { "apkscope": { "command": "/path/to/apks
 ```bash
 # recon
 apkscope scan      app.apk                                  # flags, exported components, weak crypto, TLS, keys, URLs
+apkscope fingerprint app.apk --all --strings                    # SDKs & trackers found (curated + Exodus), versions, --diff old vs new
 apkscope info      app.apk                                  # permissions, components, deep links, signature
 apkscope search    app.apk urls                             # every endpoint (app code only; --all includes libraries)
 apkscope search    app.apk secrets                           # keys & tokens; plus a labelled entropy tier of app constants
@@ -373,6 +374,7 @@ other 2. Uncertain methods get a
 | `frida_start` / `frida_hook` / `frida_events` / `frida_script` | live Frida: hook by name, read calls, args, returns |
 | `callers` / `call_graph` / `field_access` | who calls a method, the callee tree, where a field is read / written |
 | `decrypt_strings` / `scan` | recovered string-decryptor plaintext; one-shot URL + secret + HTTP scan |
+| `fingerprint` | known SDKs / frameworks / trackers with evidence, confidence and version pins; diff two builds |
 | `rename` / `comment` / `mapping` | name classes and members, comment them, import / export JADX, Enigma, ProGuard names |
 | `get_smali` / `decode_resources` / `build_apk` | edit smali, the manifest and resources, then rebuild and sign |
 | `il2cpp` / `flutter` / `disassemble` | Unity C# methods with addresses, Flutter's Dart API, raw bytecode |

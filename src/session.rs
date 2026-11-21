@@ -2241,6 +2241,16 @@ pub fn overview(st: &State) -> String {
     for (g, c, m) in sdk_share(st).into_iter().take(12) {
         let _ = writeln!(o, "{g:<28}{c:>6} / {m}");
     }
+    let _ = writeln!(
+        o,
+        "sdks              {}",
+        crate::fingerprint::summarize(&crate::fingerprint::run(
+            st,
+            false,
+            crate::fingerprint::Catalog::Both,
+            None
+        ))
+    );
     if let Some((_, e)) = elems.iter().find(|x| x.0 == "application") {
         let _ = writeln!(o, "\n// application flags");
         for f in [

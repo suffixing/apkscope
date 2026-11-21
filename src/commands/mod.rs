@@ -51,6 +51,7 @@ fn dispatch(cmd: Cmd, deobf: bool) -> Result<(), String> {
         Il2cpp(a) => il2cpp::il2cpp(&a),
         Flutter(a) => flutter::flutter(&a),
         Scan(a) => flutter::scan(&a, deobf),
+        Fingerprint(a) => fingerprint::fingerprint_cmd(&a),
         Decrypt(a) => flutter::decrypt(&a),
         Rename(a) => edit::rename(&a),
         Comment(a) => edit::comment(&a),
@@ -74,6 +75,7 @@ fn dispatch(cmd: Cmd, deobf: bool) -> Result<(), String> {
 
 mod build;
 mod edit;
+mod fingerprint;
 mod flutter;
 mod il2cpp;
 mod map;
