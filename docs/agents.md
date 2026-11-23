@@ -19,12 +19,18 @@ an MCP tool (`apkscope mcp`, see the README) and has examples under `apkscope <c
 - **The cache** is keyed by file name, size and modification time, so replacing an APK at the
   same path rebuilds it; `--no-deobf` is not needed for fresh answers.
 
+## Split bundles
+
+`.xapk`, `.apks` and `.apkm` open as their `base.apk`: classes, code, resources and search come
+from it. Config splits hold native libraries, densities and languages; `flutter` and `il2cpp` read
+native code from the splits too, `size` reads the outer file.
+
 ## Which command for which question
 
 | Question | Command |
 |---|---|
 | What is this app? | `info app.apk` (package, SDKs, permissions, components, native libs with meanings) |
-| Quick security pass | `scan app.apk` |
+| Quick security pass | `scan app.apk` (`--filter TEXT`, `--limit`/`--offset` to page it) |
 | Where does the size go? | `size app.apk` |
 | Every class that uses a string | `refs app.apk string "api/v1/login"` (add `--java` for the lines) |
 | Who calls a method / reads a field | `refs app.apk method a.b.C#m`, `refs app.apk field a.b.C#f`, `callers`, `access` |
@@ -39,7 +45,7 @@ an MCP tool (`apkscope mcp`, see the README) and has examples under `apkscope <c
 | Search one package only | `search app.apk code "token" --in a.b.net.*` (`--impl T` for subtypes of T) |
 | Which layout uses an id | `search app.apk res "@id/login_button"` (file:line) |
 | Read a resource | `resource app.apk res/layout/main.xml` |
-| What changed between versions / did my patch land | `diff old.apk new.apk --strings` |
+| What changed between versions / did my patch land | `diff old.apk new.apk --strings` (`--app-only` hides SDK churn) |
 
 ## Patching and rebuilding
 

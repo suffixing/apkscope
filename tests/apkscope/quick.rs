@@ -149,7 +149,7 @@ fn diff_reports_rotated_constants_and_near_pairs() {
         apk.display().to_string()
     };
     let (old, new) = (mk(old_val), mk(new_val));
-    let out = diff(&old, &new, true).unwrap();
+    let out = diff(&old, &new, true, false).unwrap();
     let text = out.join("\n");
     // exact: the constant's old and new values, keyed Class#FIELD
     assert!(text.contains("## constants (changed values): 1"), "{text}");

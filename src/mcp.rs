@@ -88,7 +88,7 @@ fn tools() -> Value {
         {"name": "verify_signature", "description": "Check the APK's v1 / v2 / v3 signatures and print the signer certificate.",
          "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk}}},
         {"name": "diff_apks", "description": "What changed between two versions of an app: added / removed classes, methods of classes both have, permissions, changed named constants (a rotated key shows its new value), and optionally strings (new URLs, keys) with likely rotated/renamed pairs. Lines start with + or -.",
-         "inputSchema": {"type": "object", "required": ["apk_path", "new_apk_path"], "properties": {"apk_path": apk, "new_apk_path": {"type": "string", "description": "the newer APK"}, "strings": {"type": "boolean", "description": "also diff string-pool values"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}},
+         "inputSchema": {"type": "object", "required": ["apk_path", "new_apk_path"], "properties": {"apk_path": apk, "new_apk_path": {"type": "string", "description": "the newer APK"}, "strings": {"type": "boolean", "description": "also diff string-pool values"}, "app_only": {"type": "boolean", "description": "leave out classes of known libraries (SDK churn), with their methods and constants"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}},
         {"name": "callers", "description": "Methods that call a given method (or any method of a class): who invokes it, one level up.",
          "inputSchema": {"type": "object", "required": ["apk_path", "class"], "properties": {"apk_path": apk, "class": {"type": "string", "description": "Java class name or descriptor"}, "method": {"type": "string", "description": "Method name; omit for all methods of the class"}}}},
         {"name": "call_graph", "description": "Callers of a method plus the tree of methods it calls, down to a given depth.",
@@ -98,7 +98,7 @@ fn tools() -> Value {
         {"name": "decrypt_strings", "description": "Run string-decryptor methods on their constant arguments and report the recovered plaintext (the same values shown inline as /* = \"...\" */ in decompiled code).",
          "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk}}},
         {"name": "scan", "description": "One-shot security scan as a single report: endpoints / URLs (key-like parameters marked), embedded secrets (API keys, tokens) and HTTP-client calls across code, resources and native libraries.",
-         "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk}}},
+         "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk, "filter": {"type": "string", "description": "only findings containing this text (case-insensitive), under their section titles"}, "limit": {"type": "integer", "description": "at most this many lines"}, "offset": {"type": "integer", "description": "skip this many lines (paging)"}}}},
         {"name": "frida_hook_script", "description": "Write a standalone Frida hook script for a method (or every method of a class) that logs arguments, return values and exceptions. For running hooks now, use frida_start + frida_hook instead.",
          "inputSchema": {"type": "object", "required": ["apk_path", "class"], "properties": {"apk_path": apk, "class": {"type": "string"}, "method": {"type": "string", "description": "omit for all methods"}, "live": {"type": "boolean", "description": "event body for live sessions instead of a console.log script"}}}},
         {"name": "dump_app", "description": "Run the app under Frida and save the DEX files it unpacks at runtime and the scripts it decrypts (packed / protected apps). Needs frida-tools here and frida-server on the device.",
@@ -495,6 +495,9 @@ fn call(
             if b(a, "strings") {
                 args.push("--strings".into());
             }
+            if b(a, "app_only") {
+                args.push("--app-only".into());
+            }
             paging(&mut args);
             run_cli(&args)
         }
@@ -681,7 +684,14 @@ fn call(
             run_cli(&args)
         }
         "decrypt_strings" => run_cli(&["decrypt".into(), apk]),
-        "scan" => run_cli(&["scan".into(), apk]),
+        "scan" => {
+            args.extend(["scan".into(), apk]);
+            if let Some(f) = s(a, "filter") {
+                args.extend(["--filter".into(), f]);
+            }
+            paging(&mut args);
+            run_cli(&args)
+        }
         _ => Err(format!("unknown tool {name}")),
     }
 }

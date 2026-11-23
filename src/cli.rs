@@ -573,6 +573,9 @@ pub struct DiffArgs {
     pub new: String,
     #[arg(long = "strings")]
     pub strings: bool,
+    /// leave out classes of known libraries (SDK churn), with their methods and constants
+    #[arg(long = "app-only")]
+    pub app_only: bool,
 }
 
 #[derive(Args)]
@@ -641,6 +644,9 @@ pub struct FlutterArgs {
 #[derive(Args)]
 pub struct ScanArgs {
     pub apk: String,
+    /// keep only findings containing this text (case-insensitive), under their section titles
+    #[arg(long, value_name = "TEXT")]
+    pub filter: Option<String>,
 }
 
 #[derive(Args)]

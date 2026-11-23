@@ -869,11 +869,23 @@ fn push_section(
 /// changed named constants (the rotated-key answer) and (with `strings`) string-pool values
 /// with likely rotated/renamed pairs. One line each, `+ ...` added or `- ...` removed, under
 /// a `## section: +N -M` header.
-pub fn diff(old: &str, new: &str, strings: bool) -> Result<Vec<String>, String> {
+pub fn diff(old: &str, new: &str, strings: bool, app_only: bool) -> Result<Vec<String>, String> {
     use std::collections::BTreeSet;
     let both = |f: &dyn Fn(&str) -> Result<BTreeSet<String>, String>| -> Result<(BTreeSet<String>, BTreeSet<String>), String> { Ok((f(old)?, f(new)?)) };
+    // app_only: classes of known libraries (and their methods and constants) are left out
+    let pkg = if app_only {
+        package(new)
+    } else {
+        String::new()
+    };
+    let keep = |class: &str| !app_only || search::origin(class, &pkg) != search::Origin::Library;
     let mut out = Vec::new();
-    let classes = both(&|p| Ok(classes(p, "", false, true)?.into_iter().collect()))?;
+    let classes = both(&|p| {
+        Ok(classes(p, "", false, true)?
+            .into_iter()
+            .filter(|c| keep(c))
+            .collect())
+    })?;
     push_section(&mut out, "classes", &classes);
     // methods only of classes both versions have: an added class's methods are no news
     let kept: BTreeSet<&String> = classes.0.intersection(&classes.1).collect();
@@ -902,6 +914,7 @@ pub fn diff(old: &str, new: &str, strings: bool) -> Result<Vec<String>, String> 
     let (ca, cb) = (static_strings(old)?, static_strings(new)?);
     let changed: Vec<String> = ca
         .iter()
+        .filter(|(k, _)| keep(k.split('#').next().unwrap_or(k)))
         .filter_map(|(k, v)| {
             cb.get(k)
                 .filter(|w| *w != v)

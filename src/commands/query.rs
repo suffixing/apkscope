@@ -379,5 +379,5 @@ pub fn manifest(a: &ManifestArgs) -> Result<(), String> {
 pub fn diff(a: &DiffArgs) -> Result<(), String> {
     let old = a.old.as_str();
     let new = a.new.as_str();
-    cli::emit_list(&quick::diff(old, new, a.strings)?)
+    cli::emit_list(&quick::diff(old, new, a.strings, a.app_only)?)
 }
