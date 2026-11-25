@@ -409,6 +409,9 @@ pub enum Cmd {
     /// security quick-scan
     #[command(name = "scan", after_help = crate::examples::SCAN)]
     Scan(ScanArgs),
+    /// known-SDK / framework fingerprint (AdMob, React Native, Flutter, Firebase, ...)
+    #[command(name = "fingerprint", alias = "fp", after_help = crate::examples::FINGERPRINT)]
+    Fingerprint(FingerprintArgs),
     /// run string decryptors on their constant arguments
     #[command(name = "decrypt", after_help = crate::examples::DECRYPT)]
     Decrypt(DecryptArgs),
@@ -733,6 +736,34 @@ pub struct ScanArgs {
     /// keep only findings containing this text (case-insensitive), under their section titles
     #[arg(long, value_name = "TEXT")]
     pub filter: Option<String>,
+}
+
+#[derive(Args)]
+pub struct FingerprintArgs {
+    /// APK to fingerprint (optional with --list)
+    #[arg(value_name = "APK")]
+    pub apk: Option<String>,
+    /// filter by category (ads|analytics|crash|framework|integrity|license|monetization|network|push|auth|media|storage|di|util|obfuscator)
+    #[arg(long, value_name = "CATEGORY")]
+    pub category: Option<String>,
+    /// also scan DEX string pools for URLs/banners (slower; needed for some fingerprints)
+    #[arg(long = "strings")]
+    pub strings: bool,
+    /// include the Exodus Privacy tracker list (ODbL, https://exodus-privacy.eu.org)
+    #[arg(long = "exodus")]
+    pub exodus: bool,
+    /// curated catalog + Exodus list, with curated entries winning overlaps
+    #[arg(long = "all")]
+    pub all: bool,
+    /// diff against another APK: added / removed / version-changed SDKs
+    #[arg(long, value_name = "APK")]
+    pub diff: Option<String>,
+    /// print a stable content hash of the detected set (confirmed+strong only)
+    #[arg(long = "snapshot")]
+    pub snapshot: bool,
+    /// print the catalogs, no APK needed
+    #[arg(long = "list")]
+    pub list: bool,
 }
 
 #[derive(Args)]

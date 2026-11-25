@@ -20,7 +20,10 @@ fn cstr(d: &[u8], off: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&s[..end]).into_owned())
 }
 
-pub fn parse(d: &[u8]) -> Result<Elf, String> {
+/// The section headers the parsers read: (type, offset, size, link, entsize).
+type Section = (u32, usize, usize, usize, usize);
+
+fn sections(d: &[u8]) -> Result<Vec<Section>, String> {
     if d.len() < 64 || &d[..4] != b"\x7fELF" {
         return Err("not an ELF file".into());
     }
@@ -28,20 +31,11 @@ pub fn parse(d: &[u8]) -> Result<Elf, String> {
         return Err("big-endian ELF is not supported".into());
     }
     let wide = d[4] == 2;
-    let w = if wide { 8 } else { 4 };
-    let machine = match rd(d, 18, 2) {
-        Some(0x28) => "arm (armeabi-v7a)",
-        Some(0xb7) => "arm64 (arm64-v8a)",
-        Some(0x03) => "x86",
-        Some(0x3e) => "x86_64",
-        Some(0xf3) => "riscv",
-        _ => "unknown",
-    };
-    let shoff = rd(d, if wide { 0x28 } else { 0x20 }, w).ok_or("bad header")? as usize;
+    let shoff = rd(d, if wide { 0x28 } else { 0x20 }, if wide { 8 } else { 4 })
+        .ok_or("bad header")? as usize;
     let shentsize = rd(d, if wide { 0x3a } else { 0x2e }, 2).ok_or("bad header")? as usize;
     let shnum = rd(d, if wide { 0x3c } else { 0x30 }, 2).ok_or("bad header")? as usize;
-    // (type, offset, size, link, entsize)
-    let sections: Vec<(u32, usize, usize, usize, usize)> = (0..shnum)
+    Ok((0..shnum)
         .filter_map(|i| {
             let o = shoff + i * shentsize;
             let ty = rd(d, o + 4, 4)? as u32;
@@ -62,48 +56,76 @@ pub fn parse(d: &[u8]) -> Result<Elf, String> {
             };
             Some((ty, off as usize, size as usize, link as usize, ent as usize))
         })
-        .collect();
-    let mut exports = Vec::new();
-    let mut needed = Vec::new();
-    for &(ty, off, size, link, ent) in &sections {
+        .collect())
+}
+
+/// Defined global function and object symbol names from `.dynsym`, in table order.
+fn dynsyms(d: &[u8], sections: &[Section]) -> Vec<String> {
+    let mut out = Vec::new();
+    let wide = d[4] == 2;
+    for &(ty, off, size, link, ent) in sections {
         let strtab = sections.get(link).map_or(0, |s| s.1);
-        match ty {
-            // SHT_DYNSYM
-            11 if ent > 0 => {
-                for k in 1..size / ent {
-                    let o = off + k * ent;
-                    let (name, info, shndx) = if wide {
-                        (rd(d, o, 4), d.get(o + 4).copied(), rd(d, o + 6, 2))
-                    } else {
-                        (rd(d, o, 4), d.get(o + 12).copied(), rd(d, o + 14, 2))
-                    };
-                    let (Some(name), Some(info), Some(shndx)) = (name, info, shndx) else {
-                        continue;
-                    };
-                    let (bind, kind) = (info >> 4, info & 0xf);
-                    // defined (not imported), global or weak, function or object
-                    if shndx != 0
-                        && (bind == 1 || bind == 2)
-                        && (kind == 1 || kind == 2)
-                        && let Some(n) = cstr(d, strtab + name as usize).filter(|n| !n.is_empty())
-                    {
-                        exports.push(n);
-                    }
+        // SHT_DYNSYM
+        if ty != 11 || ent == 0 {
+            continue;
+        }
+        for k in 1..size / ent {
+            let o = off + k * ent;
+            let (name, info, shndx) = if wide {
+                (rd(d, o, 4), d.get(o + 4).copied(), rd(d, o + 6, 2))
+            } else {
+                (rd(d, o, 4), d.get(o + 12).copied(), rd(d, o + 14, 2))
+            };
+            let (Some(name), Some(info), Some(shndx)) = (name, info, shndx) else {
+                continue;
+            };
+            let (bind, kind) = (info >> 4, info & 0xf);
+            // defined (not imported), global or weak, function or object
+            if shndx != 0
+                && (bind == 1 || bind == 2)
+                && (kind == 1 || kind == 2)
+                && let Some(n) = cstr(d, strtab + name as usize).filter(|n| !n.is_empty())
+            {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+pub fn parse(d: &[u8]) -> Result<Elf, String> {
+    if d.len() < 64 || &d[..4] != b"\x7fELF" {
+        return Err("not an ELF file".into());
+    }
+    if d[5] != 1 {
+        return Err("big-endian ELF is not supported".into());
+    }
+    let wide = d[4] == 2;
+    let machine = match rd(d, 18, 2) {
+        Some(0x28) => "arm (armeabi-v7a)",
+        Some(0xb7) => "arm64 (arm64-v8a)",
+        Some(0x03) => "x86",
+        Some(0x3e) => "x86_64",
+        Some(0xf3) => "riscv",
+        _ => "unknown",
+    };
+    let secs = sections(d)?;
+    let mut exports = dynsyms(d, &secs);
+    let mut needed = Vec::new();
+    let w = if wide { 8 } else { 4 };
+    for &(ty, off, size, link, ent) in &secs {
+        let strtab = secs.get(link).map_or(0, |s| s.1);
+        // SHT_DYNAMIC: DT_NEEDED entries
+        if ty == 6 && ent > 0 {
+            for k in 0..size / ent {
+                let o = off + k * ent;
+                let (tag, val) = (rd(d, o, w), rd(d, o + w, w));
+                if tag == Some(1)
+                    && let Some(n) = val.and_then(|v| cstr(d, strtab + v as usize))
+                {
+                    needed.push(n);
                 }
             }
-            // SHT_DYNAMIC: DT_NEEDED entries
-            6 if ent > 0 => {
-                for k in 0..size / ent {
-                    let o = off + k * ent;
-                    let (tag, val) = (rd(d, o, w), rd(d, o + w, w));
-                    if tag == Some(1)
-                        && let Some(n) = val.and_then(|v| cstr(d, strtab + v as usize))
-                    {
-                        needed.push(n);
-                    }
-                }
-            }
-            _ => {}
         }
     }
     exports.sort();
@@ -114,6 +136,20 @@ pub fn parse(d: &[u8]) -> Result<Elf, String> {
         needed,
         exports,
     })
+}
+
+/// The `Java_...` JNI entrypoints of a native library: the one subset of the
+/// dynsym exports a name-mangling reader can decode into a Java class. The
+/// fingerprint pass asks for these only, so it walks the symbol table without
+/// collecting, sorting or deduplicating the rest of it.
+pub fn jni_symbols(d: &[u8]) -> Vec<String> {
+    let Ok(secs) = sections(d) else {
+        return Vec::new();
+    };
+    dynsyms(d, &secs)
+        .into_iter()
+        .filter(|n| n.starts_with("Java_"))
+        .collect()
 }
 
 /// `Java_com_example_Foo_bar__I` -> ("com.example.Foo", "bar"), per the JNI name mangling rules.

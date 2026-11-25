@@ -230,6 +230,13 @@ Examples:
   apkscope scan app.apk --filter firebase     only findings that mention firebase
   apkscope scan app.apk --limit 50 --offset 50   page through a big report";
 
+pub const FINGERPRINT: &str = "\
+Examples:
+  apkscope fingerprint app.apk --all --strings   known SDKs and trackers, with versions and hosts
+  apkscope fingerprint app.apk --all --json      the same, machine-readable
+  apkscope fingerprint app.apk --diff old.apk    what changed between two builds
+  apkscope fingerprint --list                    the catalogs, no APK needed";
+
 pub const DECRYPT: &str = "\
 Examples:
   apkscope decrypt app.apk                    every string-decryptor call with constant arguments, run

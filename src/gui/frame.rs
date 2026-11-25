@@ -93,6 +93,15 @@ impl eframe::App for App {
                             self.report("Security scan".into(), |st| crate::re::scan(st).lines().map(|l| (l.to_string(), None)).collect());
                             ui.close_menu();
                         }
+                        if ui.button("SDK fingerprints").on_hover_text("Known SDKs, frameworks and trackers (curated catalog + Exodus list) with version pins, evidence and an obfuscation-aware confidence").clicked() {
+                            self.report("SDK fingerprints".into(), |st| {
+                                crate::fingerprint::report_lines(st, true, crate::fingerprint::Catalog::Both)
+                                    .into_iter()
+                                    .map(|l| (l, None))
+                                    .collect()
+                            });
+                            ui.close_menu();
+                        }
                         if ui.button("Decrypt strings").on_hover_text("Run string-decryptor methods on their constant arguments (also shown inline in the code as /* = \"...\" */)").clicked() {
                             self.report("Decrypted strings".into(), |st| crate::re::decrypt_report(&st.dexes));
                             ui.close_menu();

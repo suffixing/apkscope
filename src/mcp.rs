@@ -99,6 +99,8 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk}}},
         {"name": "scan", "description": "One-shot security scan as a single report: endpoints / URLs (key-like parameters marked), embedded secrets (API keys, tokens) and HTTP-client calls across code, resources and native libraries.",
          "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk, "filter": {"type": "string", "description": "only findings containing this text (case-insensitive), under their section titles"}, "limit": {"type": "integer", "description": "at most this many lines"}, "offset": {"type": "integer", "description": "skip this many lines (paging)"}}}},
+        {"name": "fingerprint", "description": "Fingerprint known SDKs, frameworks and trackers in the APK (curated catalog + optional Exodus list): evidence, obfuscation-aware confidence and version pins; --diff for two builds.",
+         "inputSchema": {"type": "object", "required": ["apk_path"], "properties": {"apk_path": apk, "strings": {"type": "boolean", "description": "also scan DEX string pools for URLs/banners"}, "exodus": {"type": "boolean", "description": "use the Exodus tracker list instead of the curated catalog"}, "all": {"type": "boolean", "description": "curated + Exodus, curated winning overlaps"}, "category": {"type": "string", "description": "filter: ads|analytics|crash|framework|integrity|license|monetization|network|push|auth|media|storage|di|util|obfuscator"}, "snapshot": {"type": "boolean", "description": "include a stable content hash of the detected set"}}}},
         {"name": "frida_hook_script", "description": "Write a standalone Frida hook script for a method (or every method of a class) that logs arguments, return values and exceptions. For running hooks now, use frida_start + frida_hook instead.",
          "inputSchema": {"type": "object", "required": ["apk_path", "class"], "properties": {"apk_path": apk, "class": {"type": "string"}, "method": {"type": "string", "description": "omit for all methods"}, "live": {"type": "boolean", "description": "event body for live sessions instead of a console.log script"}}}},
         {"name": "dump_app", "description": "Run the app under Frida and save the DEX files it unpacks at runtime and the scripts it decrypts (packed / protected apps). Needs frida-tools here and frida-server on the device.",
@@ -714,6 +716,26 @@ fn call(
                 args.extend(["--filter".into(), f]);
             }
             paging(&mut args);
+            run_cli(&args)
+        }
+        "fingerprint" => {
+            let mut args = vec!["fingerprint".into(), apk.clone()];
+            if b(a, "strings") {
+                args.push("--strings".into());
+            }
+            if b(a, "exodus") {
+                args.push("--exodus".into());
+            }
+            if b(a, "all") {
+                args.push("--all".into());
+            }
+            if b(a, "snapshot") {
+                args.push("--snapshot".into());
+            }
+            if let Some(c) = s(a, "category") {
+                args.push("--category".into());
+                args.push(c);
+            }
             run_cli(&args)
         }
         _ => Err(format!("unknown tool {name}")),

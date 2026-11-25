@@ -182,6 +182,7 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "apkscope"
 version = "0.13.0"
 dependencies = [
+ "aho-corasick",
  "apkscope-core",
  "clap",
  "eframe",

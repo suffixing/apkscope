@@ -288,6 +288,7 @@ Any MCP client works: `{ "mcpServers": { "apkscope": { "command": "/path/to/apks
 ```bash
 # recon
 apkscope scan      app.apk                                  # flags, exported components, weak crypto, TLS, keys, URLs (--filter TEXT)
+apkscope fingerprint app.apk --all --strings                    # SDKs & trackers found (curated + Exodus), versions, --diff old vs new
 apkscope info      app.apk                                  # permissions, components, deep links, signature
 apkscope search    app.apk urls                             # every endpoint (app code only; --all includes libraries)
 apkscope search    app.apk secrets                           # keys & tokens; plus a labelled entropy tier of app constants
@@ -405,6 +406,7 @@ other 2. Uncertain methods get a
 | `frida_setup` / `install_apk` | which frida-server the device needs (and push one you downloaded); install a bundle with the right splits and ABI |
 | `callers` / `call_graph` / `field_access` | who calls a method, the callee tree, where a field is read / written |
 | `decrypt_strings` / `scan` | recovered string-decryptor plaintext; one-shot URL + secret + HTTP scan |
+| `fingerprint` | known SDKs / frameworks / trackers with evidence, confidence and version pins; diff two builds |
 | `rename` / `comment` / `mapping` | name classes and members, comment them, import / export JADX, Enigma, ProGuard names |
 | `get_smali` / `decode_resources` / `build_apk` | edit smali, the manifest and resources, then rebuild and sign |
 | `il2cpp` / `flutter` / `disassemble` | Unity C# methods with addresses, Flutter's Dart API, raw bytecode |
@@ -552,6 +554,11 @@ Nothing is signed unless you call `sign`. Fallible functions return `apkscope_co
 
 DEX parser, decompiler, deobfuscator, resource decoder, search index, APK signer, MCP server and
 viewer: all Rust, from zero. Not a JADX fork, not a wrapper.
+
+The one borrowed dataset: the `fingerprint --all` tracker list is the
+[Exodus Privacy](https://exodus-privacy.eu.org) export, (c) Exodus Privacy contributors,
+[ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/) — `scripts/exodus_import.py`
+regenerates it offline into the tree, and it never runs unless asked for.
 
 ## Contributors
 
