@@ -14,7 +14,6 @@ on:
     # markdown: skipping the 3-OS matrix for them saves the full run.
     paths-ignore:
       - "docs/**"
-      - "bench/**"
       - "*.md"
       - "assets/logo.py"
       - ".gitignore"
@@ -27,7 +26,6 @@ on:
     # mixed docs+code PR still runs the full matrix.
     paths-ignore:
       - "docs/**"
-      - "bench/**"
       - "*.md"
       - "assets/logo.py"
       - ".gitignore"
@@ -108,6 +106,8 @@ jobs:
       # the viewer build and the tests are linted too, so neither collects warnings again
       - run: cargo clippy --release -- -D warnings
       - run: cargo clippy --release --no-default-features --tests -- -D warnings
+      # the cargo bench target (#64) as well: CI never runs it, only compiles it
+      - run: cargo clippy --release --no-default-features --benches -- -D warnings
 
   build:
     strategy:

@@ -6,6 +6,10 @@ description = "The editing core of apkscope as a library: DEX and Smali round tr
 license = "Apache-2.0"
 repository = "https://github.com/suffixing/apkscope"
 
+[lib]
+# unit tests run under `cargo test`; out of `cargo bench` so the bench target owns the run
+bench = false
+
 [dependencies]
 crc32fast = "1"
 miniz_oxide = "0.8"

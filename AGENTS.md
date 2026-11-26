@@ -19,6 +19,10 @@ cargo clippy --release --no-default-features -- -D warnings  # CI lints these th
 cargo clippy --release -- -D warnings                          # with the viewer
 cargo clippy --release --no-default-features --tests -- -D warnings
 cargo test --release --no-default-features
+cargo bench --no-default-features -- --compare main --compare HEAD --apk <apk>
+cargo bench --no-default-features -- --pr <N> --apk <apk>
+# ^ the bench harness (#64): --pr fetches the PR's merge ref vs origin/main, --bin <path>
+# benches given binaries, and --hash fails (exit 3) when outputs differ across columns
 ```
 
 ## Layout
@@ -41,7 +45,13 @@ cargo test --release --no-default-features
 - `src/upgrade/`: self-update
 - `core/`: the `apkscope-core` library (DEX, smali, resources, signing, rebuild)
 - `tests/`: unit tests, wired in with `#[cfg(test)] #[path = "..."] mod tests;` (see `tests/README.md`)
-- `bench/`: benchmark and regression scripts
+- `benches/`: the `cargo bench` target that measures everything: builds `--compare` refs into
+  worktrees, fetches `--pr` merge refs, takes `--bin` binaries as given, races `--tool` columns,
+  prints the PR table; `--hash` diffs output across columns (`BENCHMARKS.md` documents it).
+  One file per stage under `benches/bench/`, `main.rs` the pipeline: `cli` (flags), `case`
+  (the case set — add a row there), `column` (refs/PRs/bins/tools → runnable binaries),
+  `exec` (one timed subprocess), `measure` (cases × columns × runs), `digest` (`--hash`),
+  `report/` (markdown, json, svg), `util`
 
 ## Rules
 

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="406" font-family="ui-sans-serif, system-ui, sans-serif">
+<rect width="100%" height="100%" fill="white"/>
+<text x="16" y="24" font-size="15" font-weight="bold" fill="#111827">apkscope bench — Telegram: wall time (median)</text>
+<rect x="16" y="34" width="10" height="10" fill="#2563eb"/>
+<text x="30" y="43" font-size="12" fill="#374151">origin/main</text>
+<rect x="206" y="34" width="10" height="10" fill="#dc2626"/>
+<text x="220" y="43" font-size="12" fill="#374151">HEAD</text>
+<text x="242" y="83" font-size="12" fill="#111827" text-anchor="end">apkscope info</text>
+<rect x="250" y="70" width="9" height="12" fill="#2563eb"/>
+<text x="265" y="81" font-size="11" fill="#374151">215 ms</text>
+<rect x="250" y="87" width="9" height="12" fill="#dc2626"/>
+<text x="265" y="98" font-size="11" fill="#374151">215 ms</text>
+<line x1="16" y1="116" x2="924" y2="116" stroke="#e5e7eb"/>
+<text x="242" y="129" font-size="12" fill="#111827" text-anchor="end">apkscope classes</text>
+<rect x="250" y="116" width="2" height="12" fill="#2563eb"/>
+<text x="258" y="127" font-size="11" fill="#374151">36.0 ms</text>
+<rect x="250" y="133" width="1" height="12" fill="#dc2626"/>
+<text x="257" y="144" font-size="11" fill="#374151">33.3 ms</text>
+<line x1="16" y1="162" x2="924" y2="162" stroke="#e5e7eb"/>
+<text x="242" y="175" font-size="12" fill="#111827" text-anchor="end">apkscope strings</text>
+<rect x="250" y="162" width="2" height="12" fill="#2563eb"/>
+<text x="258" y="173" font-size="11" fill="#374151">44.3 ms</text>
+<rect x="250" y="179" width="3" height="12" fill="#dc2626"/>
+<text x="259" y="190" font-size="11" fill="#374151">59.1 ms</text>
+<line x1="16" y1="208" x2="924" y2="208" stroke="#e5e7eb"/>
+<text x="242" y="221" font-size="12" fill="#111827" text-anchor="end">apkscope decompile` (one class)</text>
+<rect x="250" y="208" width="2" height="12" fill="#2563eb"/>
+<text x="258" y="219" font-size="11" fill="#374151">55.1 ms</text>
+<rect x="250" y="225" width="2" height="12" fill="#dc2626"/>
+<text x="258" y="236" font-size="11" fill="#374151">55.2 ms</text>
+<line x1="16" y1="254" x2="924" y2="254" stroke="#e5e7eb"/>
+<text x="242" y="267" font-size="12" fill="#111827" text-anchor="end">apkscope smali` (one class)</text>
+<rect x="250" y="254" width="5" height="12" fill="#2563eb"/>
+<text x="261" y="265" font-size="11" fill="#374151">107 ms</text>
+<rect x="250" y="271" width="5" height="12" fill="#dc2626"/>
+<text x="261" y="282" font-size="11" fill="#374151">115 ms</text>
+<line x1="16" y1="300" x2="924" y2="300" stroke="#e5e7eb"/>
+<text x="242" y="313" font-size="12" fill="#111827" text-anchor="end">apkscope build</text>
+<rect x="250" y="300" width="37" height="12" fill="#2563eb"/>
+<text x="293" y="311" font-size="11" fill="#374151">842 ms</text>
+<rect x="250" y="317" width="37" height="12" fill="#dc2626"/>
+<text x="293" y="328" font-size="11" fill="#374151">853 ms</text>
+<line x1="16" y1="346" x2="924" y2="346" stroke="#e5e7eb"/>
+<text x="242" y="359" font-size="12" fill="#111827" text-anchor="end">the whole APK</text>
+<rect x="250" y="346" width="559" height="12" fill="#2563eb"/>
+<text x="815" y="357" font-size="11" fill="#374151">12.9 s</text>
+<rect x="250" y="363" width="560" height="12" fill="#dc2626"/>
+<text x="816" y="374" font-size="11" fill="#374151">12.9 s</text>
+<line x1="16" y1="392" x2="924" y2="392" stroke="#e5e7eb"/>
+</svg>

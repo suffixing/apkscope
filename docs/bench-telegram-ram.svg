@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="406" font-family="ui-sans-serif, system-ui, sans-serif">
+<rect width="100%" height="100%" fill="white"/>
+<text x="16" y="24" font-size="15" font-weight="bold" fill="#111827">apkscope bench — Telegram: peak RSS (median)</text>
+<rect x="16" y="34" width="10" height="10" fill="#2563eb"/>
+<text x="30" y="43" font-size="12" fill="#374151">origin/main</text>
+<rect x="206" y="34" width="10" height="10" fill="#dc2626"/>
+<text x="220" y="43" font-size="12" fill="#374151">HEAD</text>
+<text x="242" y="83" font-size="12" fill="#111827" text-anchor="end">apkscope info</text>
+<rect x="250" y="70" width="364" height="12" fill="#2563eb"/>
+<text x="620" y="81" font-size="11" fill="#374151">90 MB</text>
+<rect x="250" y="87" width="348" height="12" fill="#dc2626"/>
+<text x="604" y="98" font-size="11" fill="#374151">86 MB</text>
+<line x1="16" y1="116" x2="924" y2="116" stroke="#e5e7eb"/>
+<text x="242" y="129" font-size="12" fill="#111827" text-anchor="end">apkscope classes</text>
+<rect x="250" y="116" width="244" height="12" fill="#2563eb"/>
+<text x="500" y="127" font-size="11" fill="#374151">60 MB</text>
+<rect x="250" y="133" width="236" height="12" fill="#dc2626"/>
+<text x="492" y="144" font-size="11" fill="#374151">58 MB</text>
+<line x1="16" y1="162" x2="924" y2="162" stroke="#e5e7eb"/>
+<text x="242" y="175" font-size="12" fill="#111827" text-anchor="end">apkscope strings</text>
+<rect x="250" y="162" width="313" height="12" fill="#2563eb"/>
+<text x="569" y="173" font-size="11" fill="#374151">77 MB</text>
+<rect x="250" y="179" width="304" height="12" fill="#dc2626"/>
+<text x="560" y="190" font-size="11" fill="#374151">75 MB</text>
+<line x1="16" y1="208" x2="924" y2="208" stroke="#e5e7eb"/>
+<text x="242" y="221" font-size="12" fill="#111827" text-anchor="end">apkscope decompile` (one class)</text>
+<rect x="250" y="208" width="265" height="12" fill="#2563eb"/>
+<text x="521" y="219" font-size="11" fill="#374151">65 MB</text>
+<rect x="250" y="225" width="266" height="12" fill="#dc2626"/>
+<text x="522" y="236" font-size="11" fill="#374151">65 MB</text>
+<line x1="16" y1="254" x2="924" y2="254" stroke="#e5e7eb"/>
+<text x="242" y="267" font-size="12" fill="#111827" text-anchor="end">apkscope smali` (one class)</text>
+<rect x="250" y="254" width="213" height="12" fill="#2563eb"/>
+<text x="469" y="265" font-size="11" fill="#374151">53 MB</text>
+<rect x="250" y="271" width="214" height="12" fill="#dc2626"/>
+<text x="470" y="282" font-size="11" fill="#374151">53 MB</text>
+<line x1="16" y1="300" x2="924" y2="300" stroke="#e5e7eb"/>
+<text x="242" y="313" font-size="12" fill="#111827" text-anchor="end">apkscope build</text>
+<rect x="250" y="300" width="459" height="12" fill="#2563eb"/>
+<text x="715" y="311" font-size="11" fill="#374151">113 MB</text>
+<rect x="250" y="317" width="459" height="12" fill="#dc2626"/>
+<text x="715" y="328" font-size="11" fill="#374151">113 MB</text>
+<line x1="16" y1="346" x2="924" y2="346" stroke="#e5e7eb"/>
+<text x="242" y="359" font-size="12" fill="#111827" text-anchor="end">the whole APK</text>
+<rect x="250" y="346" width="560" height="12" fill="#2563eb"/>
+<text x="816" y="357" font-size="11" fill="#374151">138 MB</text>
+<rect x="250" y="363" width="560" height="12" fill="#dc2626"/>
+<text x="816" y="374" font-size="11" fill="#374151">138 MB</text>
+<line x1="16" y1="392" x2="924" y2="392" stroke="#e5e7eb"/>
+</svg>

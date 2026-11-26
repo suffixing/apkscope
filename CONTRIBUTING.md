@@ -15,7 +15,9 @@ CLI, MCP server and viewer over one engine. These rules keep it fast and trustwo
    `tools()` and handled in `call()` in `src/mcp.rs`), and a menu item or panel in the viewer.
    A test fails if an MCP tool has no handler.
 2. **Speed numbers.** Time the affected commands on a large real APK (Telegram, TikTok or similar)
-   against `main` and paste the numbers. A slowdown in a command people run every time
+   against `main` and paste the numbers — the harness does it in one command:
+   `cargo bench --no-default-features -- --pr <your-PR> --apk <apk>` (before pushing:
+   `--compare main --compare HEAD`). A slowdown in a command people run every time
    (`info`, `scan`, `search`) blocks the merge. Make things faster with better algorithms,
    not with caches or extra memory.
 3. **Quality on a real app.** Heuristics (secrets, URLs, config, SDK detection) must be checked on

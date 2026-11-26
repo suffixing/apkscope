@@ -1,376 +1,215 @@
 # apkscope benchmarks
 
-Every number on this page was measured on one machine (i7-10850H, 6 cores / 12 threads, 32 GB,
-Windows 11). The scripts are in [`bench/`](bench), so you can re-run them. [Back to the README](README.md)
+apkscope is measured with one tool: the `cargo bench` harness in [`benches/`](benches).
+Give it git refs, pull requests or ready-made binaries; it builds them, runs the case set
+as cold processes on the APKs you point it at, and prints the comparison table — on Linux,
+macOS and Windows, with nothing but the Rust toolchain that builds apkscope itself.
+[Back to the README](README.md)
 
-**Jump to:** [Features](#features-apkscope-vs-rust_asc-vs-jadx) · [TikTok, all three tools](#tiktok-all-three-tools) · [Agent sessions](#agent-sessions-mcp) · [Cold queries, 10 popular apps](#cold-queries-10-popular-apps) · [Earlier 14-app set](#cold-queries-14-apps-earlier-set-2026-10-30) · [How it's measured](#how-its-measured)
+**Jump to:** [Run it](#run-it) · [The case set](#the-case-set) · [Compare git refs](#compare-git-refs) · [Compare binaries](#compare-binaries) · [Compare a pull request](#compare-a-pull-request) · [Race other tools](#race-other-tools) · [Output checking](#output-checking) · [Output formats](#output-formats) · [How the numbers are made](#how-the-numbers-are-made) · [The harness layout](#the-harness-layout) · [Reference run: Telegram](#reference-run-telegram) · [History](#history)
 
-## Features: apkscope vs rust_ASC vs JADX
+## Run it
 
-| | JADX 1.5 | rust_ASC | **apkscope** |
-|---|:---:|:---:|:---:|
-| Runs without a JVM | no | yes | **yes** |
-| Typed, structured Java output | yes | no (pseudocode) | **yes** |
-| Smali view | yes | no | **yes** |
-| Deobfuscation | yes | no | **yes** |
-| GUI | yes (Java Swing) | no | **yes** (native) |
-| Gradle export | yes | no (one pseudocode file per class) | **yes**, with resources, assets, libs |
-| Decoded resources | yes | manifest only | **yes**, all of `res/` |
-| Stateless xrefs from the command line | no | yes | **yes** |
-| Xref hits with their Java lines, in one call | no | no | **yes** (`--java`) |
-| Built-in MCP server for AI agents | no | yes | **yes** |
-| Warm session across agent calls | n/a | no (new process per call) | **yes** |
-| Subclasses / implementors as a query | no | CLI only | **CLI and MCP** |
-| URL / HTTP-call / secret scans, also in native `.so` | no | no | **yes** |
-| Manifest security overview | no | no | **yes** |
-| JNI exports mapped to Java `native` methods | no | no | **yes** |
-| Edit, rebuild, zipalign, sign (v2 + v3), verify | no | no | **yes** |
-| Patch code: edit a class as Smali, reassemble into the DEX | view only, no reassembly | no | **yes** |
-| JSON output with paging and size caps for agents | JSON export only | no | **yes** |
+```
+cargo bench --no-default-features -- --compare main --compare HEAD --apk Telegram.apk
+```
 
-## TikTok, all three tools
+The `--` matters: the flags after it belong to the harness, not to cargo. Plain
+`cargo bench` measures the working tree alone — `HEAD`, uncommitted changes included.
 
-TikTok 47.2.41: a 346 MB APK with 53 DEX files and 436k classes. JADX takes minutes per run, so
-it's measured on TikTok only.
+One Markdown table per APK: a column per build, a row per case, every cell
+`wall time, peak RSS` — the median of `--runs` (default 3) cold runs. `--apk` is
+repeatable; without it the harness looks in `bench/apps/` (a convention — APKs are not
+committed, so it is usually passed explicitly). `--case` (repeatable) and `--runs` trim
+the run.
 
-| Task | JADX 1.5.6 | rust_ASC | **apkscope** |
-|---|---:|---:|---:|
-| Open in a GUI until fully loaded | 2 min 18 s / 9.4 GB | no GUI | **12.4 s / 997 MB** |
-| Full project export | 48 min 58 s / 2.0 GB | not comparable | **11 min 31 s / 857 MB** |
-| One string xref, cold process | no CLI | 213 ms | 227 ms |
-| Decompile one class, cold process | no CLI | 86 ms (pseudocode) | 101 ms (Java) |
-| List all 436k classes, cold process | no CLI | **89 ms** | 157 ms |
-| 39 agent calls through MCP | no MCP | 6.54 s | **3.94 s** |
+## The case set
 
-JADX-GUI ran with its official launcher (Java may use up to 70% of RAM); with `-Xmx24g` it took
-2 min 01 s and about 10 GB. JADX's export ran with `-e -Xmx24g` and exited with code 3 (some classes
-failed), but still wrote its project. Scripts: `open.ps1`, `tiktok.ps1`, `asc.ps1`, `mcp.py`.
+| Row | What runs |
+|---|---|
+| `apkscope info` | the manifest overview of the APK |
+| `apkscope classes` | every class in every DEX |
+| `apkscope strings` | the whole string pool |
+| `apkscope decompile` (one class) | one class as Java — the first class of `classes` output, the same class for every column |
+| `apkscope smali` (one class) | the same class as Smali |
+| `apkscope build` | rebuild and re-sign the whole APK |
+| the whole APK | `apkscope decompile <apk>` — every class, one process |
+| `apkscope fingerprint --all --strings` | known SDKs and trackers, both catalogs plus the DEX string-pool scan — opt-in: `--case fingerprint` |
 
-## Agent sessions (MCP)
+The fingerprint row is opt-in because its command lands with
+[#51](https://github.com/suffixing/apkscope/pull/51): a default run against the `--pr`
+base (`origin/main`) has no such command and the row would fail. Name it with
+`--case fingerprint` on refs that have it — e.g. racing that PR's before and after:
 
-An agent doesn't run one query, it runs dozens against the same app. This is 8 string xrefs and
-5 class decompiles on TikTok, run three times in one MCP session ([`bench/mcp.py`](bench/mcp.py)):
+```
+cargo bench --no-default-features -- \
+  --compare <pr-51-before> --compare <pr-51-after> --case fingerprint --hash --apk Telegram.apk
+```
 
-| Server | Round 1 | Round 2 | Round 3 | Total | Failed |
-|---|---:|---:|---:|---:|---:|
-| rust_ASC `mcp` | 2.29 s (median 199 ms) | 2.13 s (median 192 ms) | 2.12 s (median 191 ms) | 6.54 s | 0 |
-| apkscope `mcp`, stateless | 2.49 s (median 220 ms) | 2.48 s (median 222 ms) | 2.55 s (median 232 ms) | 7.51 s | 0 |
-| **apkscope `mcp`, warm session (default)** | **1.55 s** (median 72 ms) | **1.25 s** (median 70 ms) | **1.15 s** (median 69 ms) | **3.94 s** | 0 |
+Every run is a fresh process with `-q --no-cache`: no warm cache, no daemon, nothing
+carried between runs. `--tool` columns only fill the whole-APK row.
 
-With the warm session (the default) the median call takes **70 ms against 191 ms**: 2.7x faster
-per call, 1.7x faster in total, with Java instead of pseudocode.
+## Compare git refs
 
-## Cold queries, 10 popular apps
+`--compare <ref>` (repeatable, the first is the baseline) builds apkscope at each ref
+and gives it a column. `HEAD` (or `.`) compiles the working tree in place; every other
+ref is checked out into a worktree under `target/bench/wt/` — nothing touches your
+checkout — and cached by commit sha, so two refs at one commit build once and a re-run
+of the same ref is a cache hit. Each ref builds `--release --no-default-features` into
+its own `CARGO_TARGET_DIR` under `target/bench/`.
 
-The main set: TikTok, Facebook, YouTube, WhatsApp, Telegram, Snapchat, Netflix, Firefox, Signal
-and Duolingo, official publisher-signed builds (classes in [`bench/asc.ps1`](bench/asc.ps1)).
-One query per process, the two tools taking turns run by run, median of 7 runs; peak memory read
-from the OS after each process exits. apkscope 0.6.0 (the release build, viewer included),
-measured 2026-11-05.
+## Compare binaries
 
-**Summary of the 70 rows**, from the raw times, a row counting as a win at 10% or more either way:
+`--bin <path>` (repeatable) measures ready-made apkscope binaries exactly as given — no
+build. Race two local builds, or the installed release against a PR preview from
+[`scripts/preview-pr.sh`](scripts/preview-pr.sh):
 
-| Query | apkscope faster | level | rust_ASC faster |
-|---|---:|---:|---:|
-| Decode manifest | **10** | 0 | 0 |
-| Decompile one class | **8** | 2 | 0 |
-| List strings `-f http` | 3 | 2 | 5 |
-| List classes | 1 | 6 | 3 |
-| Method xref `openConnection` | 1 | 3 | 6 |
-| List methods | 0 | 5 | 5 |
-| String xref `https://` | 0 | 2 | 8 |
+```
+./scripts/preview-pr.sh 79
+cargo bench --no-default-features \
+  -- --bin "$(command -v apkscope)" --bin ~/.local/bin/apkscope-pr-79 --apk Telegram.apk
+```
 
-apkscope uses less memory on 59 of the 70 rows. Decompiling one class
-is up to 1.8x faster, with Java instead of pseudocode. rust_ASC still leads string xrefs
-(0.78-0.97x, 5-40 ms) and is a little quicker on most ~50 ms listings; those are bound by how
-fast the DEX files inflate on 12 threads at once.
+Every `--bin` is probed with `--version` before the first case runs, so a path that is
+not an apkscope binary fails in seconds instead of after a failed row; the version it
+prints lands in the table's footer next to the built refs' commit shas. With only
+`--bin` columns given, the working tree is not built at all.
 
-| APK | Query | rust_ASC | apkscope | Speed-up |
-|---|---|---:|---:|---:|
-| TikTok | String xref `https://` | 190 ms / 291 MB | 231 ms / 259 MB | 0.8x |
-| TikTok | Method xref `openConnection` | 145 ms / 237 MB | 112 ms / 149 MB | 1.3x |
-| TikTok | Decompile one class | 110 ms / 111 MB | 108 ms / 100 MB | 1.0x |
-| TikTok | List classes | 79 ms / 89 MB | 86 ms / 84 MB | 0.9x |
-| TikTok | List methods | 752 ms / 438 MB | 798 ms / 397 MB | 0.9x |
-| TikTok | List strings `-f http` | 170 ms / 266 MB | 96 ms / 77 MB | 1.8x |
-| TikTok | Decode manifest | 312 ms / 493 MB | 126 ms / 138 MB | 2.5x |
-| Facebook | String xref `https://` | 117 ms / 232 MB | 135 ms / 194 MB | 0.9x |
-| Facebook | Method xref `openConnection` | 101 ms / 214 MB | 94 ms / 114 MB | 1.1x |
-| Facebook | Decompile one class | 50 ms / 64 MB | 28 ms / 16 MB | 1.8x |
-| Facebook | List classes | 65 ms / 123 MB | 73 ms / 99 MB | 0.9x |
-| Facebook | List methods | 253 ms / 289 MB | 268 ms / 239 MB | 0.9x |
-| Facebook | List strings `-f http` | 100 ms / 202 MB | 65 ms / 97 MB | 1.5x |
-| Facebook | Decode manifest | 92 ms / 159 MB | 33 ms / 22 MB | 2.8x |
-| YouTube | String xref `https://` | 50 ms / 83 MB | 61 ms / 74 MB | 0.8x |
-| YouTube | Method xref `openConnection` | 52 ms / 84 MB | 62 ms / 69 MB | 0.8x |
-| YouTube | Decompile one class | 103 ms / 130 MB | 58 ms / 71 MB | 1.8x |
-| YouTube | List classes | 45 ms / 68 MB | 63 ms / 69 MB | 0.7x |
-| YouTube | List methods | 89 ms / 97 MB | 112 ms / 95 MB | 0.8x |
-| YouTube | List strings `-f http` | 50 ms / 68 MB | 55 ms / 67 MB | 0.9x |
-| YouTube | Decode manifest | 107 ms / 163 MB | 37 ms / 31 MB | 2.9x |
-| WhatsApp | String xref `https://` | 56 ms / 48 MB | 69 ms / 48 MB | 0.8x |
-| WhatsApp | Method xref `openConnection` | 59 ms / 51 MB | 66 ms / 45 MB | 0.9x |
-| WhatsApp | Decompile one class | 32 ms / 27 MB | 31 ms / 14 MB | 1.0x |
-| WhatsApp | List classes | 25 ms / 19 MB | 34 ms / 25 MB | 0.7x |
-| WhatsApp | List methods | 77 ms / 54 MB | 87 ms / 57 MB | 0.9x |
-| WhatsApp | List strings `-f http` | 58 ms / 43 MB | 38 ms / 26 MB | 1.5x |
-| WhatsApp | Decode manifest | 74 ms / 87 MB | 34 ms / 18 MB | 2.2x |
-| Telegram | String xref `https://` | 54 ms / 55 MB | 68 ms / 51 MB | 0.8x |
-| Telegram | Method xref `openConnection` | 58 ms / 55 MB | 68 ms / 48 MB | 0.9x |
-| Telegram | Decompile one class | 132 ms / 64 MB | 80 ms / 50 MB | 1.7x |
-| Telegram | List classes | 45 ms / 47 MB | 47 ms / 47 MB | 1.0x |
-| Telegram | List methods | 77 ms / 68 MB | 86 ms / 70 MB | 0.9x |
-| Telegram | List strings `-f http` | 46 ms / 46 MB | 51 ms / 47 MB | 0.9x |
-| Telegram | Decode manifest | 69 ms / 74 MB | 23 ms / 10 MB | 3.0x |
-| Snapchat | String xref `https://` | 46 ms / 66 MB | 58 ms / 60 MB | 0.8x |
-| Snapchat | Method xref `openConnection` | 45 ms / 62 MB | 58 ms / 56 MB | 0.8x |
-| Snapchat | Decompile one class | 88 ms / 93 MB | 58 ms / 58 MB | 1.5x |
-| Snapchat | List classes | 37 ms / 55 MB | 40 ms / 52 MB | 0.9x |
-| Snapchat | List methods | 81 ms / 86 MB | 96 ms / 83 MB | 0.8x |
-| Snapchat | List strings `-f http` | 42 ms / 54 MB | 47 ms / 50 MB | 0.9x |
-| Snapchat | Decode manifest | 47 ms / 66 MB | 28 ms / 21 MB | 1.7x |
-| Netflix | String xref `https://` | 43 ms / 59 MB | 47 ms / 53 MB | 0.9x |
-| Netflix | Method xref `openConnection` | 40 ms / 55 MB | 44 ms / 49 MB | 0.9x |
-| Netflix | Decompile one class | 100 ms / 99 MB | 56 ms / 52 MB | 1.8x |
-| Netflix | List classes | 40 ms / 50 MB | 40 ms / 47 MB | 1.0x |
-| Netflix | List methods | 107 ms / 90 MB | 117 ms / 90 MB | 0.9x |
-| Netflix | List strings `-f http` | 40 ms / 47 MB | 42 ms / 45 MB | 1.0x |
-| Netflix | Decode manifest | 50 ms / 69 MB | 27 ms / 23 MB | 1.9x |
-| Firefox | String xref `https://` | 50 ms / 60 MB | 59 ms / 55 MB | 0.8x |
-| Firefox | Method xref `openConnection` | 52 ms / 59 MB | 59 ms / 51 MB | 0.9x |
-| Firefox | Decompile one class | 144 ms / 86 MB | 121 ms / 61 MB | 1.2x |
-| Firefox | List classes | 72 ms / 60 MB | 74 ms / 52 MB | 1.0x |
-| Firefox | List methods | 138 ms / 97 MB | 144 ms / 99 MB | 1.0x |
-| Firefox | List strings `-f http` | 57 ms / 49 MB | 65 ms / 48 MB | 0.9x |
-| Firefox | Decode manifest | 93 ms / 135 MB | 37 ms / 26 MB | 2.6x |
-| Signal | String xref `https://` | 60 ms / 84 MB | 62 ms / 77 MB | 1.0x |
-| Signal | Method xref `openConnection` | 55 ms / 81 MB | 56 ms / 71 MB | 1.0x |
-| Signal | Decompile one class | 137 ms / 128 MB | 95 ms / 78 MB | 1.4x |
-| Signal | List classes | 63 ms / 80 MB | 57 ms / 68 MB | 1.1x |
-| Signal | List methods | 216 ms / 160 MB | 236 ms / 150 MB | 0.9x |
-| Signal | List strings `-f http` | 57 ms / 69 MB | 60 ms / 65 MB | 0.9x |
-| Signal | Decode manifest | 62 ms / 70 MB | 40 ms / 37 MB | 1.6x |
-| Duolingo | String xref `https://` | 39 ms / 29 MB | 50 ms / 28 MB | 0.8x |
-| Duolingo | Method xref `openConnection` | 43 ms / 29 MB | 46 ms / 26 MB | 0.9x |
-| Duolingo | Decompile one class | 102 ms / 57 MB | 76 ms / 31 MB | 1.3x |
-| Duolingo | List classes | 35 ms / 26 MB | 37 ms / 25 MB | 1.0x |
-| Duolingo | List methods | 64 ms / 41 MB | 81 ms / 41 MB | 0.8x |
-| Duolingo | List strings `-f http` | 36 ms / 24 MB | 42 ms / 25 MB | 0.9x |
-| Duolingo | Decode manifest | 31 ms / 26 MB | 26 ms / 13 MB | 1.2x |
+## Compare a pull request
 
-## Cold queries, 14 apps (earlier set, 2026-10-30)
+`--pr <N>` (repeatable) fetches GitHub's merge ref for PR N — the same merge CI builds —
+into `refs/bench/pr-N` and benches it as a `pr-N` column:
 
-One query per process: start, read the APK, answer, exit. Median of 7 runs, wall time and peak
-memory of the whole process ([`bench/asc.ps1`](bench/asc.ps1)). The F-Droid APKs are the official
-builds from `https://f-droid.org/repo/`; their file names and the classes used are in the script.
+```
+cargo bench --no-default-features -- --pr 79 --apk Telegram.apk
+```
 
-**Summary of the 98 rows**, counting a row as a win at 10% or more either way. The manifest rows
-were re-measured for apkscope after its manifest speedup, the same day on the same machine:
+Without `--compare`, the base column comes first: `--base <ref>`, default `origin/main`,
+refreshed by the same fetch — the tip GitHub merges the PR into, not a possibly stale
+local `main`. A PR with conflicts (or a closed PR) has no merge ref; the harness falls
+back to the unmerged head and says so on stderr.
 
-| Query | apkscope faster | level | rust_ASC faster |
-|---|---:|---:|---:|
-| Decompile one class | **9** | 2 | 3 |
-| Method xref | 4 | 5 | 5 |
-| List classes | 3 | 5 | 6 |
-| List methods | 1 | 8 | 5 |
-| List strings | 1 | 9 | 4 |
-| String xref | 1 | 6 | 7 |
-| Decode manifest | **12** | 1 | 1 |
+`--pr` talks to `origin`, so it needs the network — everything else in the harness is
+local. Pull refs live on the repository the PR targets: a clone of `suffixing/apkscope`
+can bench every PR; from a fork clone, fetch upstream first or use `--bin` with a
+preview from `scripts/preview-pr.sh`.
 
-- **apkscope uses less memory in most rows**, often half (Nextcloud decompile: 75 MB vs 194 MB).
-- **apkscope decompiles one class faster on 9 of 14 apps**, and its output is typed Java.
-- **rust_ASC is quicker on most other cold queries**, usually by 5–15 ms on small apps, where both
-  tools spend most of their time starting a Windows process (~30 ms). On TikTok it still lists
-  classes 1.8x faster.
-- **apkscope decodes the manifest faster on 12 of 14 apps**, up to 6x (TikTok: 33 ms vs 207 ms). It
-  reads only the resource names the manifest needs and one zip entry, not the whole archive index.
+## Race other tools
 
-Correctness, checked against rust_ASC on TikTok: the same 436,708 classes, 2,016,476 methods and
-2,138,305 pool strings, and the same string xrefs except one, where rust_ASC reports a method whose
-bytecode has no such string. For method names apkscope matches the whole name (`openConnection`),
-while rust_ASC matches substrings; use `--regex` for substrings.
+`--tool <name>` (repeatable) adds an external tool as a column, found on PATH or given
+as an absolute path. It runs `<tool> <apk>` in a scratch directory and fills the
+whole-APK row; the apkscope-only rows show `—`.
 
-### Zestle
+## Output checking
 
+`--hash` digests every run's output with SHA-256 and turns the bench into an
+output-equivalence check across the apkscope columns — built refs, PRs and `--bin`
+binaries alike:
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 40 ms / 20 MB | 46 ms / 19 MB | 0.9x |
-| Method xref `openConnection` | 38 ms / 20 MB | 46 ms / 18 MB | 0.8x |
-| Decompile one class | 78 ms / 43 MB | 81 ms / 26 MB | 1.0x |
-| List classes | 40 ms / 19 MB | 41 ms / 20 MB | 1.0x |
-| List methods | 61 ms / 30 MB | 64 ms / 31 MB | 1.0x |
-| List strings `-f http` | 31 ms / 13 MB | 30 ms / 14 MB | 1.0x |
-| Decode manifest | 30 ms / 17 MB | 15 ms / 4 MB | 2.0x |
+- stdout for every case except `build`; for `build`, the rebuilt APK's entry list and
+  CRCs, so re-signing or fresh zip timestamps cannot make two identical rebuilds look
+  different
+- one hash table per APK next to the timing table; every case whose digest differs
+  between columns is reported on stdout *and* stderr, and the bench **exits 3**
 
-### Unciv
+A perf PR that also changed output says so right next to its numbers, and CI can gate
+on the exit code.
 
+## Output formats
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 47 ms / 43 MB | 54 ms / 39 MB | 0.9x |
-| Method xref `openConnection` | 47 ms / 42 MB | 48 ms / 36 MB | 1.0x |
-| Decompile one class | 107 ms / 71 MB | 87 ms / 42 MB | 1.2x |
-| List classes | 48 ms / 42 MB | 50 ms / 39 MB | 1.0x |
-| List methods | 126 ms / 74 MB | 122 ms / 75 MB | 1.0x |
-| List strings `-f http` | 44 ms / 37 MB | 44 ms / 37 MB | 1.0x |
-| Decode manifest | 31 ms / 33 MB | 15 ms / 4 MB | 2.1x |
+`--format markdown` (default) prints the PR-shaped table. `--format json` dumps the same
+measurements machine-readably — per column: name, exe, commit sha (built refs) or
+`--version` line (`--bin`); per cell: median seconds, peak RSS bytes, digest, error.
+`--format svg` writes one bar chart per APK and metric to
+`docs/bench-<apk>-{time,ram}.svg`.
 
-### Capital
+Exit codes: 0 = every run succeeded · 1 = a run failed · 2 = setup error · 3 = `--hash`
+found differing outputs (cargo reports non-zero as a failed bench — that is the point).
 
+Worktrees, builds, fetched refs' scratch and binaries land under `target/bench/`
+(`cargo clean` removes them; `git worktree prune` clears the stale metadata a clean
+leaves behind).
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 44 ms / 57 MB | 46 ms / 31 MB | 1.0x |
-| Method xref `openConnection` | 38 ms / 51 MB | 42 ms / 29 MB | 0.9x |
-| Decompile one class | 43 ms / 58 MB | 46 ms / 32 MB | 0.9x |
-| List classes | 35 ms / 49 MB | 29 ms / 30 MB | 1.2x |
-| List methods | 76 ms / 73 MB | 76 ms / 49 MB | 1.0x |
-| List strings `-f http` | 29 ms / 48 MB | 29 ms / 29 MB | 1.0x |
-| Decode manifest | 43 ms / 57 MB | 28 ms / 11 MB | 1.5x |
+## How the numbers are made
 
-### TikTok
+- **Cold runs.** Every run is a fresh process with `-q --no-cache`; the table shows the
+  median of `--runs` (default 3) — never a single sample, never a warm cache.
+- **Peak RSS from the OS.** `wait4(2)`'s `ru_maxrss` on Linux and macOS,
+  `GetProcessMemoryInfo` on Windows — read once when the child exits, no polling, no
+  race with short-lived processes.
+- **The same class everywhere.** The one-class rows decompile the class picked once from
+  the first column's `classes` output, so outputs — and `--hash` digests — compare.
+- **The binary that ships.** Built refs compile `--release --no-default-features`: the
+  CLI + MCP server the cases exercise. The viewer is not benched.
+- **Units follow the value.** Times below a second print in milliseconds, above it in
+  seconds, past a minute in minutes — each cell in the unit its value calls for.
 
-<sub>47.2.41, 53 DEX, 436k classes</sub>
+## The harness layout
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 213 ms / 341 MB | 227 ms / 307 MB | 0.9x |
-| Method xref `openConnection` | 156 ms / 278 MB | 135 ms / 193 MB | 1.2x |
-| Decompile one class | 86 ms / 99 MB | 101 ms / 154 MB | 0.9x |
-| List classes | 89 ms / 96 MB | 157 ms / 185 MB | 0.6x |
-| List methods | 918 ms / 501 MB | 1,093 ms / 450 MB | 0.8x |
-| List strings `-f http` | 180 ms / 323 MB | 122 ms / 178 MB | 1.5x |
-| Decode manifest | 207 ms / 339 MB | 33 ms / 41 MB | 6.3x |
+The harness is modular: `benches/bench/main.rs` is the pipeline — parse the flags,
+resolve the APKs, build the columns, measure, report — and every stage owns a file
+next to it:
 
-### KeePassDX
+| File | Owns | Extend it to |
+|---|---|---|
+| `benches/bench/main.rs` | the pipeline, the exit codes | change the flow |
+| `benches/bench/cli.rs` | the flags | add an option |
+| `benches/bench/case.rs` | the case set | add a row: one `CaseDef` — id, label, argv |
+| `benches/bench/column.rs` | the columns | add a source of binaries |
+| `benches/bench/exec.rs` | one timed subprocess | support another OS |
+| `benches/bench/measure.rs` | cases × columns × runs | change what a cell records |
+| `benches/bench/digest.rs` | `--hash` | change what "same output" means |
+| `benches/bench/report/` | markdown, json, svg | add an output format |
+| `benches/bench/util.rs` | git, slugs, tails | shared plumbing |
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 46 ms / 40 MB | 48 ms / 37 MB | 1.0x |
-| Method xref `openConnection` | 43 ms / 38 MB | 49 ms / 35 MB | 0.9x |
-| Decompile one class | 94 ms / 65 MB | 66 ms / 40 MB | 1.4x |
-| List classes | 37 ms / 37 MB | 49 ms / 38 MB | 0.8x |
-| List methods | 138 ms / 74 MB | 105 ms / 69 MB | 1.3x |
-| List strings `-f http` | 35 ms / 34 MB | 43 ms / 35 MB | 0.8x |
-| Decode manifest | 31 ms / 23 MB | 16 ms / 12 MB | 1.9x |
+Adding a case or an output format touches one file (plus an enum variant and a match
+arm); the run loop, the digests and the other formats pick it up on their own.
 
-### Nextcloud
+## Reference run: Telegram
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 57 ms / 152 MB | 54 ms / 79 MB | 1.1x |
-| Method xref `openConnection` | 52 ms / 146 MB | 48 ms / 71 MB | 1.1x |
-| Decompile one class | 79 ms / 194 MB | 76 ms / 75 MB | 1.0x |
-| List classes | 53 ms / 140 MB | 62 ms / 82 MB | 0.9x |
-| List methods | 271 ms / 216 MB | 323 ms / 155 MB | 0.8x |
-| List strings `-f http` | 54 ms / 133 MB | 52 ms / 72 MB | 1.0x |
-| Decode manifest | 65 ms / 99 MB | 31 ms / 17 MB | 2.1x |
+Measured with the harness itself on Telegram's direct download
+(`https://telegram.org/dl/android/apk`, 81.7 MB, 4 DEX files, 22,204 classes), 2026-11-24:
 
-### AntennaPod
+- machine: an Intel Xeon cloud VM (2 cores, 4 GB RAM), Linux 5.10
+- command: `cargo bench --no-default-features -- --compare origin/main --compare HEAD --hash --runs 5 --apk Telegram.apk`
+- columns: `origin/main` at `a401b62` · `HEAD` — this PR's tree, the one-file-per-stage
+  harness included
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 31 ms / 22 MB | 46 ms / 27 MB | 0.7x |
-| Method xref `openConnection` | 37 ms / 27 MB | 46 ms / 25 MB | 0.8x |
-| Decompile one class | 86 ms / 50 MB | 78 ms / 29 MB | 1.1x |
-| List classes | 41 ms / 26 MB | 41 ms / 28 MB | 1.0x |
-| List methods | 78 ms / 41 MB | 76 ms / 40 MB | 1.0x |
-| List strings `-f http` | 31 ms / 19 MB | 31 ms / 25 MB | 1.0x |
-| Decode manifest | 32 ms / 24 MB | 16 ms / 4 MB | 2.0x |
+### Telegram.apk
 
-### Element
+|  | origin/main | HEAD |
+| --- | --- | --- |
+| `apkscope info` | 211 ms, 88 MB | 210 ms, 86 MB |
+| `apkscope classes` | 34.1 ms, 58 MB | 33.0 ms, 58 MB |
+| `apkscope strings` | 43.5 ms, 77 MB | 59.6 ms, 75 MB |
+| `apkscope decompile` (one class) | 54.9 ms, 65 MB | 54.8 ms, 65 MB |
+| `apkscope smali` (one class) | 105 ms, 52 MB | 106 ms, 52 MB |
+| `apkscope build` | 856 ms, 113 MB | 871 ms, 113 MB |
+| the whole APK | 12.9 s, 138 MB | 12.8 s, 138 MB |
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 57 ms / 116 MB | 60 ms / 103 MB | 1.0x |
-| Method xref `openConnection` | 57 ms / 109 MB | 58 ms / 95 MB | 1.0x |
-| Decompile one class | 111 ms / 162 MB | 91 ms / 98 MB | 1.2x |
-| List classes | 61 ms / 105 MB | 77 ms / 107 MB | 0.8x |
-| List methods | 490 ms / 215 MB | 495 ms / 213 MB | 1.0x |
-| List strings `-f http` | 47 ms / 94 MB | 57 ms / 95 MB | 0.8x |
-| Decode manifest | 56 ms / 77 MB | 30 ms / 21 MB | 1.9x |
+Columns: `origin/main` = apkscope `a401b62` · `HEAD` = this PR's tree. Median of
+5 cold runs; every digest under `--hash` was identical across the two columns (exit 0);
+a pass of the same command with `--format svg` wrote the two charts below.
 
-### OsmAnd
+<p>
+  <img src="docs/bench-telegram-time.svg" alt="Telegram wall-time bar chart: every case level between origin/main and HEAD, from 33 ms (classes) to 12.9 s (whole APK)" width="760">
+  <img src="docs/bench-telegram-ram.svg" alt="Telegram peak-RSS bar chart: every case level between origin/main and HEAD, from 53 MB (smali) to 138 MB (whole APK)" width="760">
+</p>
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 48 ms / 72 MB | 55 ms / 69 MB | 0.9x |
-| Method xref `openConnection` | 51 ms / 71 MB | 47 ms / 63 MB | 1.1x |
-| Decompile one class | 103 ms / 101 MB | 81 ms / 64 MB | 1.3x |
-| List classes | 56 ms / 64 MB | 61 ms / 64 MB | 0.9x |
-| List methods | 193 ms / 128 MB | 202 ms / 114 MB | 1.0x |
-| List strings `-f http` | 47 ms / 59 MB | 60 ms / 63 MB | 0.8x |
-| Decode manifest | 87 ms / 162 MB | 46 ms / 49 MB | 1.9x |
+The columns are level — this PR adds a bench target and docs, no apkscope code, and
+every `--hash` digest is identical, which is exactly what the table should show. One
+row carries its own caveat: on this shared VM, `strings` is position-sensitive —
+whichever column is measured first lands near 45 ms and the second near 60 ms, and
+re-running with the columns swapped turns the row around (46.5 ms / 60.6 ms). Read
+that row as "~45-60 ms, either mode", not as a regression.
 
-### Thunderbird
+## History
 
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 48 ms / 26 MB | 48 ms / 25 MB | 1.0x |
-| Method xref `openConnection` | 51 ms / 26 MB | 47 ms / 23 MB | 1.1x |
-| Decompile one class | 106 ms / 58 MB | 98 ms / 34 MB | 1.1x |
-| List classes | 42 ms / 25 MB | 41 ms / 25 MB | 1.0x |
-| List methods | 73 ms / 38 MB | 80 ms / 38 MB | 0.9x |
-| List strings `-f http` | 48 ms / 23 MB | 48 ms / 23 MB | 1.0x |
-| Decode manifest | 17 ms / 17 MB | 29 ms / 14 MB | 0.6x |
-
-### Fennec
-
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 48 ms / 57 MB | 62 ms / 51 MB | 0.8x |
-| Method xref `openConnection` | 53 ms / 57 MB | 54 ms / 49 MB | 1.0x |
-| Decompile one class | 101 ms / 83 MB | 110 ms / 55 MB | 0.9x |
-| List classes | 65 ms / 59 MB | 58 ms / 56 MB | 1.1x |
-| List methods | 138 ms / 90 MB | 172 ms / 91 MB | 0.8x |
-| List strings `-f http` | 49 ms / 47 MB | 49 ms / 48 MB | 1.0x |
-| Decode manifest | 73 ms / 131 MB | 29 ms / 26 MB | 2.5x |
-
-### NewPipe
-
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 48 ms / 26 MB | 48 ms / 25 MB | 1.0x |
-| Method xref `openConnection` | 49 ms / 26 MB | 49 ms / 23 MB | 1.0x |
-| Decompile one class | 98 ms / 53 MB | 79 ms / 30 MB | 1.2x |
-| List classes | 42 ms / 23 MB | 42 ms / 23 MB | 1.0x |
-| List methods | 78 ms / 40 MB | 78 ms / 37 MB | 1.0x |
-| List strings `-f http` | 46 ms / 22 MB | 48 ms / 23 MB | 1.0x |
-| Decode manifest | 31 ms / 18 MB | 29 ms / 14 MB | 1.1x |
-
-### VLC
-
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 49 ms / 72 MB | 49 ms / 65 MB | 1.0x |
-| Method xref `openConnection` | 46 ms / 68 MB | 47 ms / 61 MB | 1.0x |
-| Decompile one class | 83 ms / 99 MB | 65 ms / 63 MB | 1.3x |
-| List classes | 58 ms / 68 MB | 52 ms / 67 MB | 1.1x |
-| List methods | 133 ms / 113 MB | 188 ms / 117 MB | 0.7x |
-| List strings `-f http` | 43 ms / 60 MB | 57 ms / 62 MB | 0.8x |
-| Decode manifest | 42 ms / 56 MB | 30 ms / 17 MB | 1.4x |
-
-### Wikipedia
-
-| Query | rust_ASC | apkscope | Speed-up |
-|---|---:|---:|---:|
-| String xref `https://` | 47 ms / 29 MB | 58 ms / 29 MB | 0.8x |
-| Method xref `openConnection` | 49 ms / 29 MB | 64 ms / 27 MB | 0.8x |
-| Decompile one class | 118 ms / 62 MB | 95 ms / 35 MB | 1.2x |
-| List classes | 41 ms / 26 MB | 48 ms / 28 MB | 0.9x |
-| List methods | 85 ms / 41 MB | 83 ms / 43 MB | 1.0x |
-| List strings `-f http` | 48 ms / 25 MB | 48 ms / 26 MB | 1.0x |
-| Decode manifest | 70 ms / 105 MB | 30 ms / 25 MB | 2.3x |
-## How it's measured
-
-- `bench/asc.ps1 <rust_ASC.exe> <apkscope.exe> 7` (`-Legacy` for the earlier 14 apps): the same
-  query through both tools, taking turns, each run in a fresh process; median wall time of 7 runs,
-  peak working set across them.
-- `python bench/mcp.py <rust_ASC.exe> <apkscope.exe> <apk>`: one MCP session per server, the same
-  13 calls three times.
-- rust_ASC was built from source with its own release profile (`lto = "fat"`, `codegen-units = 1`).
-  apkscope was built with `cargo build --release --no-default-features`.
-- Small-app numbers move by about ±10 ms between runs, so a 0.9x or 1.1x row there is mostly noise.
+Until this page was rewritten, it carried the cross-tool races (JADX, rust_ASC) and the
+10- and 14-app cold-query tables measured by the PowerShell/Python scripts under
+`bench/` — Windows-first, and a JDK for some cases. [#64](https://github.com/suffixing/apkscope/issues/64)
+replaced them with the harness and retired the scripts; their tables and scripts live on
+in git history, along with that era's `docs/bench-*.svg` charts (TikTok) — kept as they
+were measured, and superseded in the README by the harness's Telegram charts.
 
 [Back to the README](README.md)

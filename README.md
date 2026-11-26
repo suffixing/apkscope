@@ -10,7 +10,7 @@
 <p align="center">
   <a href="#get-started"><img src="https://img.shields.io/badge/Get_started-30_seconds-f0883e?style=for-the-badge" alt="Get started"></a>
   <a href="#what-it-found"><img src="https://img.shields.io/badge/Real_findings-5_apps-db2777?style=for-the-badge" alt="Real findings in 5 apps"></a>
-  <a href="BENCHMARKS.md"><img src="https://img.shields.io/badge/Benchmarks-10_popular_apps-2ea44f?style=for-the-badge" alt="Benchmarks: 10 popular apps"></a>
+  <a href="BENCHMARKS.md"><img src="https://img.shields.io/badge/Benchmarks-cargo_bench-2ea44f?style=for-the-badge" alt="Benchmarks: the cargo bench harness"></a>
   <a href="https://github.com/suffixing/apkscope/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/suffixing/apkscope/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
 </p>
 
@@ -26,8 +26,8 @@
 
 > **In 10 seconds:** one executable, no Java. Drop in an APK and get a security overview, readable
 > Java, every endpoint and who calls it. Use it as a **viewer**, a **CLI**, or an **MCP server** your
-> AI agent drives. Opens TikTok **11x faster than JADX with 9x less RAM**, and decompiles a class
-> **up to 1.8x faster than rust_ASC**, as typed Java instead of pseudocode.
+> AI agent drives. All of Telegram — 81.7 MB, 4 DEX, 22,204 classes — decompiled in **12.8 s on
+> 138 MB of RAM**; its manifest overview lands in **0.2 s**.
 
 ## What it found
 
@@ -197,20 +197,27 @@ guessing. ECB on one block is the spec. Knowing which flags to drop is half the 
 ## Speed
 
 <p align="center">
-  <img src="docs/bench-open.svg" alt="Open TikTok until fully loaded: apkscope 12.4 s, JADX-GUI 2 min 18 s" width="760">
+  <img src="docs/bench-telegram-time.svg" alt="Telegram wall-time bar chart: every case level between origin/main and HEAD, from 33 ms (classes) to 12.9 s (whole APK)" width="760">
 </p>
+
+Measured on Telegram's direct download (81.7 MB, 4 DEX, 22,204 classes) by the
+[`cargo bench` harness](BENCHMARKS.md) — median of 5 cold runs (`-q --no-cache`), a fresh
+process per run:
 
 | | |
 |---|---|
-| **11x faster** than JADX to open TikTok, **9x less RAM** | 12.4 s / 997 MB vs 2 min 18 s / 9.4 GB |
-| **Up to 1.8x faster** than rust_ASC decompiling one class | faster on 8 of 10 popular apps, level on 2, as Java |
-| **1.2-3x faster** decoding the manifest | all 10 apps, with 10-138 MB instead of 26-493 MB |
-| **Less memory** than rust_ASC | on 59 of 70 cold queries |
-| **2.7x faster** than rust_ASC per agent call | 70 ms vs 191 ms median, over MCP |
+| **0.2 s** to the manifest overview | `apkscope info`: 210 ms, 86 MB peak RSS |
+| **33 ms** to list all 22,204 classes | `apkscope classes`, every DEX, cold |
+| **55 ms** for one class as typed Java | `apkscope decompile`, cold, no cache |
+| **106 ms** for the same class as Smali | `apkscope smali`, cold, no cache |
+| **0.9 s** to rebuild and re-sign the APK | `apkscope build`: 871 ms, 113 MB |
+| **12.8 s / 138 MB** for the whole APK | every class decompiled, one process |
 | **Typed Java**, not pseudocode | a reviewer, or an agent, can trust it |
 | **One tool**: decompiler, xrefs, recon, diff, Frida, unpacking, re-signing, GUI, MCP | instead of five |
 
-Every number comes from a script in [`bench/`](bench). [All results →](BENCHMARKS.md)
+Every number above is one `cargo bench` command away — the same run that printed it also
+checked that the output digests match across builds. The cross-tool races of the pre-harness
+era (JADX, rust_ASC) live on in git history.
 
 **For** security researchers, mobile pentesters, privacy researchers, developers checking what a
 library really does, and anyone who hands APKs to an AI agent.
@@ -387,8 +394,8 @@ Object[] objArr2 = new Object[1];
 </td></tr></table>
 
 Loops, `switch`, `try`/`catch`/`finally`, lambdas, enums, typed names and deobfuscation
-(`a.b` → `pkg_a.RunnableB`). Faster than rust_ASC per class on 8 of 10 popular apps, level on the
-other 2. Uncertain methods get a
+(`a.b` → `pkg_a.RunnableB`). A single class of Telegram lands in **55 ms** — cold, no cache.
+Uncertain methods get a
 `/* WARNING */` header; failures fall back to Smali, never silently.
 
 ## Built for AI agents
@@ -414,7 +421,7 @@ other 2. Uncertain methods get a
 Every CLI command is also an MCP tool and a menu item in the viewer.
 
 Replies page with `limit` / `offset` and cap at 60k characters; `app_only` hides androidx, Play
-services and ad SDKs. 39 agent calls on TikTok: **3.94 s** vs rust_ASC's **6.54 s**.
+services and ad SDKs.
 
 Ask *"Can this app's HTTPS traffic be intercepted?"* and the agent finds finding 4 on its own, in
 under half a second of tool time.
@@ -506,8 +513,9 @@ Nothing is signed unless you call `sign`. Fallible functions return `apkscope_co
 ## Honest limits
 
 - Some complex methods still use `goto` labels (marked `WARNING`).
-- Cold one-shot queries: rust_ASC is still quicker at string xrefs (0.78-0.97x, 5-40 ms) and a
-  little quicker on most ~50 ms listings. In agent sessions apkscope is faster.
+- Cold one-shot queries pay process start and the DEX read every time — 33 ms to 211 ms per
+  call on Telegram (`-q --no-cache`, the harness numbers). Sessions and the MCP server keep
+  what they read.
 - Huge apps take about 1 GB in the viewer; the first full-code search takes a minute, then it's cached.
 - The viewer is tested on Windows and Linux (Ubuntu, including WSLg).
 - `apkscope_windows_aarch64.exe` is built natively on a Windows 11 ARM runner; the x86_64 exe

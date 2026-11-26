@@ -2,8 +2,8 @@
 
 **Decompiles a class up to 1.8x faster than rust_ASC, as typed Java, with less memory.**
 Measured on 10 popular apps (TikTok, Facebook, YouTube, WhatsApp, Telegram, Snapchat, Netflix,
-Firefox, Signal, Duolingo) with [`bench/asc.ps1`](../bench/asc.ps1); full results in
-[BENCHMARKS.md](../BENCHMARKS.md).
+Firefox, Signal, Duolingo) with the retired `bench/asc.ps1` script (kept in git history);
+full results in [BENCHMARKS.md](../BENCHMARKS.md) at v0.6.0.
 
 ## Faster
 
